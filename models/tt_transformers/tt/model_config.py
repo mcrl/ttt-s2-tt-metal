@@ -81,20 +81,40 @@ class MathFidelitySetting(Enum):
 
 
 class ModelOptimizations:
+    @staticmethod
+    def _uniform_bfp8_tensor_settings(include_activation=True):
+        settings = {
+            TensorGroup.FF1_FF3: PrecisionSetting.BFP8,
+            TensorGroup.FF2: PrecisionSetting.BFP8,
+            TensorGroup.WQKV: PrecisionSetting.BFP8,
+            TensorGroup.WO: PrecisionSetting.BFP8,
+            TensorGroup.KV_CACHE: PrecisionSetting.BFP8,
+        }
+        if include_activation:
+            settings[TensorGroup.ACTIVATION] = PrecisionSetting.BFP8
+        return settings
+
+    @staticmethod
+    def _uniform_bfp8_op_fidelity_settings():
+        return {
+            OpGroup.LI_FF1_FF3: MathFidelitySetting.HIFI2_FP16,
+            OpGroup.LI_FF2: MathFidelitySetting.HIFI2_FP16,
+        }
+
     @classmethod
     def accuracy(cls, model_name):
         """Configuration optimized for accuracy
-        70B+ models still use bfp4 MLPs and BFP8 attention in this configuration
+        Large-model and dense LLM accuracy settings prefer one BFP8 matmul family.
         """
         base_model_name = get_base_model_name(model_name)
         if base_model_name in ["Llama-3.1-70B", "Llama-3.2-90B", "DeepSeek-R1-Distill-Llama-70B", "Qwen2.5-72B"]:
             logger.info(
-                f"{model_name} is >70B and large models test insensitive precision, using BFP4 MLPs and BFP8 attention even in accuracy mode"
+                f"{model_name} is >70B and large models test insensitive precision, using a uniform BFP8 matmul tensor configuration even in accuracy mode"
             )
             inst = cls(
                 {
-                    "TensorPrecision": {TensorGroup.FF1_FF3: PrecisionSetting.BFP4},
-                    "OpFidelity": {OpGroup.LI_FF1_FF3: MathFidelitySetting.LOFI},
+                    "TensorPrecision": cls._uniform_bfp8_tensor_settings(),
+                    "OpFidelity": cls._uniform_bfp8_op_fidelity_settings(),
                 }
             )
         else:
@@ -109,18 +129,11 @@ class ModelOptimizations:
                         f"Model {model_name} is running out of DRAM memory for weight fetching under standard accuracy settings, using BFP8 for WQKV"
                     )
                 logger.info(
-                    f"Llama 3, Mistral 7B and Phi3-mini models test insensitive to attention precision, using BFP8 attention and kv-cache with FP16 MLP accumulation even in accuracy mode"
+                    f"Llama 3, Mistral 7B and Phi3-mini models test insensitive to attention precision, using a uniform BFP8 matmul tensor configuration with FP16 MLP accumulation even in accuracy mode"
                 )
                 settings = {
-                    "TensorPrecision": {
-                        TensorGroup.WQKV: PrecisionSetting.BFP8,
-                        TensorGroup.KV_CACHE: PrecisionSetting.BFP8,
-                        TensorGroup.WO: PrecisionSetting.BFP8,
-                    },
-                    "OpFidelity": {
-                        OpGroup.LI_FF1_FF3: MathFidelitySetting.HIFI2_FP16,
-                        OpGroup.LI_FF2: MathFidelitySetting.HIFI2_FP16,
-                    },
+                    "TensorPrecision": cls._uniform_bfp8_tensor_settings(),
+                    "OpFidelity": cls._uniform_bfp8_op_fidelity_settings(),
                 }
                 if model_name.startswith("Phi-3-mini"):  # TODO: Only do this for N150
                     logger.info(
@@ -152,7 +165,7 @@ class ModelOptimizations:
     @classmethod
     def performance(cls, model_name):
         """Configuration optimized for performance
-        All models use bfp4 in FF1 and FF3 MLPs in this configuration
+        Dense LLMs prefer one BFP8 matmul tensor family in this configuration.
         """
         base_model_name = get_base_model_name(model_name)
         if base_model_name == "Qwen2.5-7B":
@@ -178,8 +191,8 @@ class ModelOptimizations:
             )
         else:
             settings = {
-                "TensorPrecision": {TensorGroup.FF1_FF3: PrecisionSetting.BFP4},
-                "OpFidelity": {OpGroup.LI_FF1_FF3: MathFidelitySetting.LOFI},
+                "TensorPrecision": cls._uniform_bfp8_tensor_settings(),
+                "OpFidelity": cls._uniform_bfp8_op_fidelity_settings(),
             }
             if model_name.startswith("Phi-3-mini"):  # TODO: Only do this for N150
                 logger.info(
