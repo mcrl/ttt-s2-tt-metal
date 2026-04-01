@@ -62,7 +62,7 @@ def split_list(lst, n):
 
 
 class Generator:
-    def __init__(self, model, model_args, mesh_device, processor=None, tokenizer=None):
+    def __init__(self, model, model_args, mesh_device, processor=None, tokenizer=None, prefill_pad_to=None):
         """
         Creating a LlamaVision wrapper requires only a mesh_device and model_args.
         With model_args you have the checkpoint location, can specify max batch size
@@ -88,9 +88,21 @@ class Generator:
         self.trace_output_decode = defaultdict(lambda: None)
         self.trace_execute_signposted_decode = defaultdict(lambda: False)
         self.prefill_traces_warmup = False
+        self.prefill_pad_to = prefill_pad_to
         # Performance-only shortcut: disable split sampling so Tracy decode
         # measurements exclude separate sampling capture/replay.
         self.enable_split_sampling = False
+
+    def _get_prefill_seq_len(self, seq_len: int) -> int:
+        if self.prefill_pad_to is None:
+            return get_padded_prefill_len(seq_len)
+
+        if self.prefill_pad_to < seq_len:
+            raise ValueError(
+                f"Forced prefill_pad_to ({self.prefill_pad_to}) must be >= prompt seq_len ({seq_len})"
+            )
+
+        return self.prefill_pad_to
 
     def _chunk_sampling_param(self, values):
         if isinstance(values, List):
@@ -113,8 +125,11 @@ class Generator:
             return
 
         self.prefill_traces_warmup = True
+        supported_lengths = (
+            [self.prefill_pad_to] if self.prefill_pad_to is not None else self.model_args[0].trace_prefill_supported_seq_lens
+        )
         for model_id in range(self.data_parallel):
-            for supported_length in self.model_args[0].trace_prefill_supported_seq_lens:
+            for supported_length in supported_lengths:
                 warmup_tokens = torch.zeros(1, supported_length, dtype=torch.long)
                 warmup_prompt_lens = torch.tensor([supported_length], dtype=torch.long)
                 warmup_empty_slots = list(range(1))
@@ -273,7 +288,7 @@ class Generator:
             group_user_id = user_id % max_batch_size_per_model if page_table is None else 0
             seq_len = int(prompt_lens[idx])
             last_token_idx = seq_len - 1
-            prefill_seq_len = get_padded_prefill_len(seq_len)
+            prefill_seq_len = self._get_prefill_seq_len(seq_len)
             local_kwargs = kwargs.copy()  # Avoid modifying original kwargs
 
             logger.info(f"Prefilling User {user_id + 1} up to {seq_len} tokens")

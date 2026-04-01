@@ -774,6 +774,7 @@ def test_demo_text(
         instruct = request.config.getoption("--instruct")
     repeat_batches = request.config.getoption("--repeat_batches") or repeat_batches
     max_seq_len = request.config.getoption("--max_seq_len") or max_seq_len
+    prefill_pad_to = request.config.getoption("--prefill_pad_to")
     batch_size = request.config.getoption("--batch_size") or batch_size
     max_generated_tokens = request.config.getoption("--max_generated_tokens") or max_generated_tokens
     data_parallel = request.config.getoption("--data_parallel") or data_parallel
@@ -896,7 +897,14 @@ def test_demo_text(
                 f"Max seq len {max_seq_len} not supported by model {m_args.model_name}. The model's max context len is {m_args.max_context_len}"
             )
 
-    generator = Generator(model, model_args, mesh_device, processor=processor, tokenizer=tokenizer)
+    generator = Generator(
+        model,
+        model_args,
+        mesh_device,
+        processor=processor,
+        tokenizer=tokenizer,
+        prefill_pad_to=prefill_pad_to,
+    )
 
     if token_accuracy:
         input_prompts[0] = token_acc.prepare_ref_tokens(tokenizer)
