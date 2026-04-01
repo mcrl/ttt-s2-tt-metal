@@ -12,14 +12,22 @@
 #include "ttnn/tensor/tensor.hpp"
 #include "ttnn/types.hpp"
 
+#include "optimized_matmul_policy.hpp"
+
 namespace ttnn::operations::experimental::matmul::optimized_matmul {
 
 struct OptimizedMatmulDeviceOperation {
     struct operation_attributes_t {
         MemoryConfig output_memory_config;
+        uint32_t variant_id;
+        uint32_t active_grid_x;
+        uint32_t active_grid_y;
 
-        static constexpr auto attribute_names = std::forward_as_tuple("output_memory_config");
-        auto attribute_values() const { return std::forward_as_tuple(output_memory_config); }
+        static constexpr auto attribute_names =
+            std::forward_as_tuple("output_memory_config", "variant_id", "active_grid_x", "active_grid_y");
+        auto attribute_values() const {
+            return std::forward_as_tuple(output_memory_config, variant_id, active_grid_x, active_grid_y);
+        }
     };
 
     struct tensor_args_t {
@@ -32,10 +40,10 @@ struct OptimizedMatmulDeviceOperation {
 
     struct MultiCoreProgramFactory {
         struct shared_variables_t {
-            tt::tt_metal::KernelHandle reader_kernel_id;
-            tt::tt_metal::KernelHandle writer_kernel_id;
-            std::size_t num_cores;
-            std::size_t num_cores_y;
+            tt::tt_metal::KernelHandle dmvk_noc0_kernel_id;
+            tt::tt_metal::KernelHandle dmvk_noc1_kernel_id;
+            uint32_t active_grid_x;
+            uint32_t active_grid_y;
         };
 
         using cached_program_t = ttnn::device_operation::CachedProgram<shared_variables_t>;

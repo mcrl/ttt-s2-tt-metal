@@ -1,0 +1,187 @@
+// SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
+//
+// SPDX-License-Identifier: Apache-2.0
+
+#pragma once
+
+#include <cstdint>
+#include <optional>
+
+#include <tt-metalium/constants.hpp>
+#include <tt-metalium/core_coord.hpp>
+#include <tt_stl/assert.hpp>
+
+#include "kernels/dataflow/schedules/wormhole_b0_8x8_schedule.hpp"
+#include "optimized_matmul_policy.hpp"
+#include "ttnn/operations/matmul/device/matmul_op.hpp"
+#include "ttnn/tensor/tensor_utils.hpp"
+
+namespace ttnn::operations::experimental::matmul::optimized_matmul {
+
+struct OptimizedMatmulConfig {
+    uint32_t Mt;
+    uint32_t Nt;
+    uint32_t Kt;
+    uint32_t BMt;
+    uint32_t BNt;
+    uint32_t BKt;
+    uint32_t SBMt;
+    uint32_t SBNt;
+    uint32_t total_row_blocks;
+    uint32_t total_col_blocks;
+    uint32_t row_nblocks_per_core;
+    uint32_t col_nblocks_per_core;
+};
+
+struct OptimizedMatmulBufferLayout {
+    uint32_t a_page_size;
+    uint32_t a_total_size;
+    uint32_t b_page_size;
+    uint32_t b_total_size;
+    uint32_t c_page_size;
+    uint32_t c_total_size;
+};
+
+inline uint32_t ceil_div_u32(const uint32_t value, const uint32_t divisor) {
+    return (value + divisor - 1) / divisor;
+}
+
+inline OptimizedMatmulConfig resolve_optimized_matmul_config(
+    const Tensor& input_tensor_a, const Tensor& input_tensor_b, const tt::tt_metal::CoreCoord& active_grid) {
+    using namespace ttnn::operations::matmul;
+
+    const auto program_config = resolve_matmul_2d_reuse_program_config(
+        input_tensor_a, input_tensor_b, std::nullopt, Matmul{}, std::nullopt);
+
+    const auto& a_shape = input_tensor_a.padded_shape();
+    const auto& b_shape = input_tensor_b.padded_shape();
+
+    const auto mt = static_cast<uint32_t>(a_shape[-2] / tt::constants::TILE_HEIGHT);
+    const auto nt = static_cast<uint32_t>(b_shape[-1] / tt::constants::TILE_WIDTH);
+    const auto kt = static_cast<uint32_t>(a_shape[-1] / tt::constants::TILE_WIDTH);
+
+    const auto bmt = static_cast<uint32_t>(program_config.out_block_h);
+    const auto bnt = static_cast<uint32_t>(program_config.out_block_w);
+    const auto bkt = static_cast<uint32_t>(program_config.in0_block_w);
+    const auto sbmt = static_cast<uint32_t>(program_config.out_subblock_h);
+    const auto sbnt = static_cast<uint32_t>(program_config.out_subblock_w);
+
+    TT_FATAL(bmt > 0 && bnt > 0 && bkt > 0, "optimized_matmul resolved an invalid block config");
+    TT_FATAL(sbmt > 0 && sbnt > 0, "optimized_matmul resolved an invalid subblock config");
+    TT_FATAL(bmt % sbmt == 0 && bnt % sbnt == 0, "optimized_matmul requires block sizes divisible by subblocks");
+    TT_FATAL(kt % bkt == 0, "optimized_matmul requires K tiles {} to be divisible by BKt {}", kt, bkt);
+
+    const auto total_row_blocks = ceil_div_u32(mt, bmt);
+    const auto total_col_blocks = ceil_div_u32(nt, bnt);
+
+    return {
+        .Mt = mt,
+        .Nt = nt,
+        .Kt = kt,
+        .BMt = bmt,
+        .BNt = bnt,
+        .BKt = bkt,
+        .SBMt = sbmt,
+        .SBNt = sbnt,
+        .total_row_blocks = total_row_blocks,
+        .total_col_blocks = total_col_blocks,
+        .row_nblocks_per_core = ceil_div_u32(total_row_blocks, active_grid.y),
+        .col_nblocks_per_core = ceil_div_u32(total_col_blocks, active_grid.x),
+    };
+}
+
+inline uint32_t split_balanced_items(const uint32_t total_items, const uint32_t chunks_per_core, const uint32_t chunk_idx) {
+    if (chunk_idx >= chunks_per_core) {
+        return 0;
+    }
+
+    const uint32_t base_items = total_items / chunks_per_core;
+    const uint32_t remainder = total_items % chunks_per_core;
+    return chunk_idx < remainder ? base_items + 1 : base_items;
+}
+
+inline uint32_t split_front_loaded_items(
+    const uint32_t total_items, const uint32_t chunks_per_core, const uint32_t chunk_idx) {
+    if (chunk_idx >= chunks_per_core) {
+        return 0;
+    }
+
+    const uint32_t base_items = total_items / chunks_per_core;
+    if (chunk_idx == 0) {
+        return total_items - base_items * (chunks_per_core - 1);
+    }
+    return base_items;
+}
+
+inline OptimizedMatmulBufferLayout resolve_optimized_matmul_buffer_layout(
+    const OptimizedMatmulConfig& config,
+    const OptimizedMatmulVariantSpec& variant_spec,
+    const uint32_t single_tile_size,
+    const uint32_t dram_bank_count) {
+    const uint32_t logical_a_size = single_tile_size * config.Mt * config.Kt;
+    const uint32_t logical_b_size = single_tile_size * config.Kt * config.Nt;
+    const uint32_t logical_c_size = single_tile_size * config.Mt * config.Nt;
+    const uint32_t num_kblocks = config.Kt / config.BKt;
+    const uint32_t repetitions_a = config.row_nblocks_per_core * num_kblocks;
+    const uint32_t repetitions_b = config.col_nblocks_per_core * num_kblocks;
+    const uint32_t repetitions_c = config.row_nblocks_per_core * config.col_nblocks_per_core;
+    const uint32_t a_tiles_per_block = config.BMt * config.BKt;
+    const uint32_t b_tiles_per_block = config.BKt * config.BNt;
+    const uint32_t n_subblocks = (config.BMt / config.SBMt) * (config.BNt / config.SBNt);
+    const uint32_t subblock_bytes = single_tile_size * config.SBMt * config.SBNt;
+
+    auto set_slot_layout = [single_tile_size, dram_bank_count](
+                               const bool enabled,
+                               const uint32_t logical_size,
+                               const uint32_t repetitions,
+                               const uint32_t valid_slots_per_bank_count,
+                               const uint32_t slot_bytes) {
+        std::pair<uint32_t, uint32_t> result{};
+        if (!enabled) {
+            result.first = single_tile_size;
+            result.second = logical_size;
+            return result;
+        }
+
+        result.first = repetitions * valid_slots_per_bank_count * slot_bytes;
+        result.second = result.first * dram_bank_count;
+        return result;
+    };
+
+    const auto [a_page_size, a_total_size] = set_slot_layout(
+        variant_spec.optimized_a_read,
+        logical_a_size,
+        repetitions_a,
+        A_READ_valid_slots_per_bank_count,
+        split_balanced_items(a_tiles_per_block, A_READ_CHUNKS_PER_CORE, 0) * single_tile_size);
+
+    const auto [b_page_size, b_total_size] = set_slot_layout(
+        variant_spec.optimized_b_read,
+        logical_b_size,
+        repetitions_b,
+        B_READ_valid_slots_per_bank_count,
+        split_balanced_items(b_tiles_per_block, B_READ_CHUNKS_PER_CORE, 0) * single_tile_size);
+
+    const uint32_t c_chunks =
+        variant_spec.optimized_write_use_generated_schedule ? C_WRITE_CHUNKS_PER_CORE : NUM_PHASE;
+    const uint32_t c_valid_slots_per_bank_count = variant_spec.optimized_write_use_generated_schedule
+                                                      ? C_WRITE_valid_slots_per_bank_count
+                                                      : C_WRITE_HARDCODED_valid_slots_per_bank_count;
+    const auto [c_page_size, c_total_size] = set_slot_layout(
+        variant_spec.optimized_write,
+        logical_c_size,
+        repetitions_c,
+        c_valid_slots_per_bank_count,
+        split_front_loaded_items(n_subblocks, c_chunks, 0) * subblock_bytes);
+
+    return {
+        .a_page_size = a_page_size,
+        .a_total_size = a_total_size,
+        .b_page_size = b_page_size,
+        .b_total_size = b_total_size,
+        .c_page_size = c_page_size,
+        .c_total_size = c_total_size,
+    };
+}
+
+}  // namespace ttnn::operations::experimental::matmul::optimized_matmul

@@ -4,19 +4,62 @@
 
 #include "optimized_matmul_device_operation.hpp"
 
+#include <cstdint>
+#include <map>
 #include <vector>
 
 #include <tt-metalium/constants.hpp>
 #include <tt-metalium/host_api.hpp>
-#include <tt-metalium/tensor_accessor_args.hpp>
-#include <tt-metalium/work_split.hpp>
 
-#include "ttnn/tensor/tensor_utils.hpp"
+#include "optimized_matmul_config.hpp"
 
 namespace ttnn::operations::experimental::matmul::optimized_matmul {
 
 using namespace tt;
 using namespace tt::constants;
+
+namespace {
+
+constexpr uint32_t kInputPipelineDepth = 2;
+constexpr uint32_t kOutputPipelineDepth = 1;
+constexpr uint32_t kSyncPageSize = 4;
+constexpr auto kScheduleHeaderIncludePath = "\"schedules/wormhole_b0_8x8_schedule.hpp\"";
+
+tt::tt_metal::CoreRange get_active_cores(const OptimizedMatmulDeviceOperation::operation_attributes_t& attributes) {
+    return tt::tt_metal::CoreRange({0, 0}, {attributes.active_grid_x - 1, attributes.active_grid_y - 1});
+}
+
+void create_data_circular_buffer(
+    tt::tt_metal::Program& program,
+    const tt::tt_metal::CoreRange& cores,
+    const uint32_t cb_index,
+    const uint32_t num_tiles,
+    const tt::DataFormat data_format) {
+    using namespace tt::tt_metal;
+
+    CircularBufferConfig cb_config =
+        CircularBufferConfig(tt::tile_size(data_format) * num_tiles, {{cb_index, data_format}})
+            .set_page_size(cb_index, tt::tile_size(data_format));
+    CreateCircularBuffer(program, cores, cb_config);
+}
+
+void create_sync_circular_buffer(
+    tt::tt_metal::Program& program, const tt::tt_metal::CoreRange& cores, const uint32_t cb_index) {
+    using namespace tt::tt_metal;
+
+    CircularBufferConfig cb_config =
+        CircularBufferConfig(kSyncPageSize, {{cb_index, tt::DataFormat::UInt32}}).set_page_size(cb_index, kSyncPageSize);
+    CreateCircularBuffer(program, cores, cb_config);
+}
+
+std::map<std::string, std::string> create_kernel_defines(const uint32_t variant_id) {
+    auto defines = get_optimized_matmul_kernel_defines(
+        get_optimized_matmul_variant_spec(static_cast<OptimizedMatmulVariantId>(variant_id)));
+    defines["TTT_DMVK_SCHEDULE_HEADER"] = kScheduleHeaderIncludePath;
+    return defines;
+}
+
+}  // namespace
 
 OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::cached_program_t
 OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::create(
@@ -27,12 +70,6 @@ OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::create(
 
     const auto& input_tensor_a = tensor_args.input_tensor_a;
     const auto& input_tensor_b = tensor_args.input_tensor_b;
-
-    Program program{};
-
-    const auto& a_shape = input_tensor_a.padded_shape();
-    const auto& b_shape = input_tensor_b.padded_shape();
-    const auto& c_shape = output_tensor.padded_shape();
 
     auto* src0_buffer = input_tensor_a.buffer();
     auto* src1_buffer = input_tensor_b.buffer();
@@ -46,142 +83,136 @@ OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::create(
         operation_attributes.output_memory_config,
         output_tensor.memory_config());
 
-    const auto input_data_format = datatype_to_dataformat_converter(input_tensor_a.dtype());
-    const auto weight_data_format = datatype_to_dataformat_converter(input_tensor_b.dtype());
-    const auto output_data_format = datatype_to_dataformat_converter(output_tensor.dtype());
+    const auto resolved_config = resolve_optimized_matmul_config(
+        input_tensor_a,
+        input_tensor_b,
+        tt::tt_metal::CoreCoord{operation_attributes.active_grid_x, operation_attributes.active_grid_y});
 
-    const uint32_t input_single_tile_size = tt::tile_size(input_data_format);
-    const uint32_t weight_single_tile_size = tt::tile_size(weight_data_format);
-    const uint32_t output_single_tile_size = tt::tile_size(output_data_format);
+    Program program{};
 
-    auto* device = input_tensor_a.device();
-    const auto compute_with_storage_grid_size = device->compute_with_storage_grid_size();
-    const uint32_t num_cores_y = compute_with_storage_grid_size.y;
+    const auto all_cores = get_active_cores(operation_attributes);
+    const auto cb_data_format = datatype_to_dataformat_converter(input_tensor_a.dtype());
 
-    const uint32_t num_output_tiles_total = get_batch_size(c_shape) * c_shape[-2] * c_shape[-1] / TILE_HW;
-    auto
-        [num_cores,
-         all_cores,
-         core_group_1,
-         core_group_2,
-         num_output_tiles_per_core_group_1,
-         num_output_tiles_per_core_group_2] =
-            split_work_to_cores(compute_with_storage_grid_size, num_output_tiles_total);
+    create_data_circular_buffer(
+        program, all_cores, tt::CBIndex::c_0, resolved_config.BMt * resolved_config.BKt * kInputPipelineDepth, cb_data_format);
+    create_data_circular_buffer(
+        program, all_cores, tt::CBIndex::c_1, resolved_config.BKt * resolved_config.BNt * kInputPipelineDepth, cb_data_format);
+    create_data_circular_buffer(
+        program, all_cores, tt::CBIndex::c_16, resolved_config.BMt * resolved_config.BNt * kOutputPipelineDepth, cb_data_format);
+    create_data_circular_buffer(
+        program, all_cores, tt::CBIndex::c_24, resolved_config.BMt * resolved_config.BNt * kOutputPipelineDepth, cb_data_format);
+    create_sync_circular_buffer(program, all_cores, tt::CBIndex::c_25);
+    create_sync_circular_buffer(program, all_cores, tt::CBIndex::c_26);
 
-    const uint32_t batch_size_a = get_batch_size(a_shape);
-    const uint32_t batch_size_b = get_batch_size(b_shape);
-    const bool broadcast_batch = batch_size_a > 1 && batch_size_b == 1;
+    const auto a_master_sem = CreateSemaphore(program, all_cores, 0);
+    const auto a_slave_sem = CreateSemaphore(program, all_cores, INVALID);
+    const auto b_master_sem = CreateSemaphore(program, all_cores, 0);
+    const auto b_slave_sem = CreateSemaphore(program, all_cores, INVALID);
+    const auto global_master_sem = CreateSemaphore(program, all_cores, 0);
+    const auto global_slave_sem = CreateSemaphore(program, all_cores, INVALID);
 
-    const uint32_t Mt = a_shape[-2] / TILE_HEIGHT;
-    const uint32_t Kt = a_shape[-1] / TILE_WIDTH;
-    const uint32_t Nt = b_shape[-1] / TILE_WIDTH;
-    const uint32_t MtKt = Mt * Kt;
-    const uint32_t KtNt = Kt * Nt;
-    const uint32_t MtNt = Mt * Nt;
+    const std::vector<uint32_t> dataflow_compile_args = {
+        a_master_sem,
+        a_slave_sem,
+        b_master_sem,
+        b_slave_sem,
+        global_master_sem,
+        global_slave_sem,
+        operation_attributes.active_grid_x,
+        operation_attributes.active_grid_y,
+    };
 
-    const uint32_t src0_addr = src0_buffer->address();
-    const uint32_t src1_addr = src1_buffer->address();
-    const uint32_t dst_addr = dst_buffer->address();
+    const auto kernel_defines = create_kernel_defines(operation_attributes.variant_id);
 
-    constexpr uint32_t src0_cb_index = tt::CBIndex::c_0;
-    constexpr uint32_t src1_cb_index = tt::CBIndex::c_1;
-    constexpr uint32_t output_cb_index = tt::CBIndex::c_16;
-    constexpr uint32_t num_input_tiles = 2;
-    constexpr uint32_t num_output_tiles = 2;
-
-    CircularBufferConfig src0_cb_config =
-        CircularBufferConfig(num_input_tiles * input_single_tile_size, {{src0_cb_index, input_data_format}})
-            .set_page_size(src0_cb_index, input_single_tile_size);
-    CreateCircularBuffer(program, all_cores, src0_cb_config);
-
-    CircularBufferConfig src1_cb_config =
-        CircularBufferConfig(num_input_tiles * weight_single_tile_size, {{src1_cb_index, weight_data_format}})
-            .set_page_size(src1_cb_index, weight_single_tile_size);
-    CreateCircularBuffer(program, all_cores, src1_cb_config);
-
-    CircularBufferConfig output_cb_config =
-        CircularBufferConfig(num_output_tiles * output_single_tile_size, {{output_cb_index, output_data_format}})
-            .set_page_size(output_cb_index, output_single_tile_size);
-    CreateCircularBuffer(program, all_cores, output_cb_config);
-
-    const uint32_t last_ktile_w = input_tensor_a.logical_shape()[-1] % TILE_WIDTH;
-    std::vector<uint32_t> reader_compile_time_args = {last_ktile_w};
-    TensorAccessorArgs(*src0_buffer).append_to(reader_compile_time_args);
-    TensorAccessorArgs(*src1_buffer).append_to(reader_compile_time_args);
-
-    std::vector<uint32_t> writer_compile_time_args = {output_cb_index};
-    TensorAccessorArgs(*dst_buffer).append_to(writer_compile_time_args);
-
-    auto reader_kernel_id = CreateKernel(
+    const auto dmvk_noc0_kernel_id = CreateKernel(
         program,
-        "ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/device/kernels/dataflow/reader_optimized_matmul.cpp",
+        "ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/device/kernels/dataflow/dmvk_optimized_matmul.cpp",
         all_cores,
-        ReaderDataMovementConfig(reader_compile_time_args));
+        DataMovementConfig{
+            .processor = DataMovementProcessor::RISCV_0,
+            .noc = NOC::RISCV_0_default,
+            .noc_mode = NOC_MODE::DM_DEDICATED_NOC,
+            .compile_args = dataflow_compile_args,
+            .defines = kernel_defines});
 
-    auto writer_kernel_id = CreateKernel(
+    const auto dmvk_noc1_kernel_id = CreateKernel(
         program,
-        "ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/device/kernels/dataflow/writer_optimized_matmul.cpp",
+        "ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/device/kernels/dataflow/dmvk_optimized_matmul.cpp",
         all_cores,
-        WriterDataMovementConfig(writer_compile_time_args));
+        DataMovementConfig{
+            .processor = DataMovementProcessor::RISCV_1,
+            .noc = NOC::RISCV_1_default,
+            .noc_mode = NOC_MODE::DM_DEDICATED_NOC,
+            .compile_args = dataflow_compile_args,
+            .defines = kernel_defines});
 
-    std::vector<uint32_t> compute_args_group_1 = {1, 1, Kt, num_output_tiles_per_core_group_1};
-    CreateKernel(
+    const std::vector<uint32_t> compute_compile_args = {
+        resolved_config.Kt / resolved_config.BKt,
+        resolved_config.BMt,
+        resolved_config.BNt,
+        resolved_config.BKt,
+        resolved_config.SBMt,
+        resolved_config.SBNt,
+        resolved_config.SBMt * resolved_config.SBNt,
+        resolved_config.BMt * resolved_config.BNt,
+        resolved_config.BMt * resolved_config.BKt,
+        resolved_config.BKt * resolved_config.BNt,
+    };
+
+    const auto compute_kernel_id = CreateKernel(
         program,
         "ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/device/kernels/compute/optimized_bmm.cpp",
-        core_group_1,
+        all_cores,
         ComputeConfig{
-            .math_fidelity = MathFidelity::HiFi4, .dst_full_sync_en = true, .compile_args = compute_args_group_1});
+            .math_fidelity = MathFidelity::HiFi4,
+            .compile_args = compute_compile_args,
+            .defines = kernel_defines});
 
-    if (!core_group_2.ranges().empty()) {
-        std::vector<uint32_t> compute_args_group_2 = {1, 1, Kt, num_output_tiles_per_core_group_2};
-        CreateKernel(
-            program,
-            "ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/device/kernels/compute/optimized_bmm.cpp",
-            core_group_2,
-            ComputeConfig{
-                .math_fidelity = MathFidelity::HiFi4, .dst_full_sync_en = true, .compile_args = compute_args_group_2});
-    }
+    const auto src0_addr = src0_buffer->address();
+    const auto src1_addr = src1_buffer->address();
+    const auto dst_addr = dst_buffer->address();
 
-    for (uint32_t core_index = 0, num_tiles_written = 0; core_index < num_cores; ++core_index) {
-        CoreCoord core = {core_index / num_cores_y, core_index % num_cores_y};
+    for (uint32_t y = 0; y < operation_attributes.active_grid_y; ++y) {
+        for (uint32_t x = 0; x < operation_attributes.active_grid_x; ++x) {
+            const CoreCoord core = {x, y};
+            const uint32_t row_block_start = y * resolved_config.row_nblocks_per_core;
+            const uint32_t col_block_start = x * resolved_config.col_nblocks_per_core;
 
-        uint32_t num_output_tiles_per_core = 0;
-        if (core_group_1.contains(core)) {
-            num_output_tiles_per_core = num_output_tiles_per_core_group_1;
-        } else if (core_group_2.contains(core)) {
-            num_output_tiles_per_core = num_output_tiles_per_core_group_2;
-        } else {
-            TT_THROW("optimized_matmul core not in specified core ranges");
+            const std::vector<uint32_t> dataflow_runtime_args = {
+                src0_addr,
+                src1_addr,
+                dst_addr,
+                resolved_config.Mt,
+                resolved_config.Nt,
+                resolved_config.Kt,
+                resolved_config.BMt,
+                resolved_config.BNt,
+                resolved_config.BKt,
+                resolved_config.SBMt,
+                resolved_config.SBNt,
+                row_block_start,
+                col_block_start,
+                resolved_config.row_nblocks_per_core,
+                resolved_config.col_nblocks_per_core,
+            };
+
+            SetRuntimeArgs(program, dmvk_noc0_kernel_id, core, dataflow_runtime_args);
+            SetRuntimeArgs(program, dmvk_noc1_kernel_id, core, dataflow_runtime_args);
+            SetRuntimeArgs(
+                program,
+                compute_kernel_id,
+                core,
+                {row_block_start, col_block_start, resolved_config.row_nblocks_per_core, resolved_config.col_nblocks_per_core});
         }
-
-        SetRuntimeArgs(
-            program,
-            reader_kernel_id,
-            core,
-            {src0_addr,
-             src1_addr,
-             Mt,
-             Kt,
-             Nt,
-             MtKt,
-             KtNt,
-             batch_size_a,
-             static_cast<uint32_t>(broadcast_batch),
-             num_tiles_written,
-             num_output_tiles_per_core,
-             MtNt});
-
-        SetRuntimeArgs(program, writer_kernel_id, core, {dst_addr, num_output_tiles_per_core, num_tiles_written});
-        num_tiles_written += num_output_tiles_per_core;
     }
 
     return {
         std::move(program),
         {
-            .reader_kernel_id = reader_kernel_id,
-            .writer_kernel_id = writer_kernel_id,
-            .num_cores = num_cores,
-            .num_cores_y = num_cores_y,
+            .dmvk_noc0_kernel_id = dmvk_noc0_kernel_id,
+            .dmvk_noc1_kernel_id = dmvk_noc1_kernel_id,
+            .active_grid_x = operation_attributes.active_grid_x,
+            .active_grid_y = operation_attributes.active_grid_y,
         }};
 }
 
@@ -193,11 +224,6 @@ void OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::override_runtime_a
     using namespace tt::tt_metal;
 
     auto& program = cached_program.program;
-    const auto reader_kernel_id = cached_program.shared_variables.reader_kernel_id;
-    const auto writer_kernel_id = cached_program.shared_variables.writer_kernel_id;
-    const auto num_cores = cached_program.shared_variables.num_cores;
-    const auto num_cores_y = cached_program.shared_variables.num_cores_y;
-
     auto* src0_buffer = tensor_args.input_tensor_a.buffer();
     auto* src1_buffer = tensor_args.input_tensor_b.buffer();
     auto* dst_buffer = output_tensor.buffer();
@@ -208,18 +234,18 @@ void OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::override_runtime_a
         operation_attributes.output_memory_config,
         output_tensor.memory_config());
 
-    for (uint32_t core_index = 0; core_index < num_cores; ++core_index) {
-        CoreCoord core = {core_index / num_cores_y, core_index % num_cores_y};
+    for (uint32_t y = 0; y < cached_program.shared_variables.active_grid_y; ++y) {
+        for (uint32_t x = 0; x < cached_program.shared_variables.active_grid_x; ++x) {
+            const CoreCoord core = {x, y};
 
-        {
-            auto& runtime_args = GetRuntimeArgs(program, reader_kernel_id, core);
-            runtime_args[0] = src0_buffer->address();
-            runtime_args[1] = src1_buffer->address();
-        }
-
-        {
-            auto& runtime_args = GetRuntimeArgs(program, writer_kernel_id, core);
-            runtime_args[0] = dst_buffer->address();
+            for (const auto kernel_id : {
+                     cached_program.shared_variables.dmvk_noc0_kernel_id,
+                     cached_program.shared_variables.dmvk_noc1_kernel_id}) {
+                auto& runtime_args = GetRuntimeArgs(program, kernel_id, core);
+                runtime_args[0] = src0_buffer->address();
+                runtime_args[1] = src1_buffer->address();
+                runtime_args[2] = dst_buffer->address();
+            }
         }
     }
 }
