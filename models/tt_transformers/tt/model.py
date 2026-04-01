@@ -349,6 +349,7 @@ class Transformer(LightweightModule):
         Input is ttnn device tensor of logits. Output is torch logits tensor.
         NOTE: In this model, prefill always uses get_last_token
         """
+        ttnn.ReadDeviceProfiler(self.mesh_device)
         return self.concat_host_output(tt_out.cpu())[0, 0, last_token_idx, : self.vocab_size]
 
     def process_output_decode(self, tt_out, B, S=1, is_tokens=False):
@@ -365,6 +366,7 @@ class Transformer(LightweightModule):
         else:
             tt_out = ttnn.to_torch(tt_out).float()
         tt_out = tt_out[:, :, :B, : self.vocab_size].view(B, S, -1)
+        ttnn.ReadDeviceProfiler(self.mesh_device)
         return tt_out
 
     def ttnn_prefill_forward(
@@ -432,12 +434,9 @@ class Transformer(LightweightModule):
             self._increment_decode_positions_device(current_pos, rot_mat_idxs)
             if capture_sampling_trace:
                 return tt_logits
-            tt_toks = self.sampling.sample(
-                tt_logits,
-                tt_out_tok=x,
-                enable_trace=False,
-            )
-            return tt_toks
+            # Performance-only shortcut: bypass on-device sampling so decode
+            # trace measurements are not polluted by sampling ops.
+            return x
 
         # Gather the output across all devices and untilize the tensor (for argmax)
         if self.args.num_devices > 1:

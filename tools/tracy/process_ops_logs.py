@@ -892,7 +892,8 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
                 rowDict["HOST START TS"] = int(signposts[row]["tracy_time"])
             elif type(row) is int:
                 op = row
-                if op > ((1 << TRACE_OP_ID_BITSHIFT) - 1):
+                is_trace_op = op > ((1 << TRACE_OP_ID_BITSHIFT) - 1)
+                if is_trace_op:
                     opData = traceOps[op]
                     opData["global_call_count"] = ((1 << TRACE_OP_ID_BITSHIFT) - 1) & op
                 else:
@@ -907,7 +908,12 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
                         rowDict[headerField] = fieldData
 
                 assert "host_time" in opData, "Corrupted op data"
-                rowDict["HOST START TS"] = int(opData["host_time"]["ns_since_start"])
+                # Trace replay ops should use replay time so signpost-based filtering
+                # can correctly isolate the replay region in downstream analysis.
+                if is_trace_op:
+                    rowDict["HOST START TS"] = int(opData["tracy_time"])
+                else:
+                    rowDict["HOST START TS"] = int(opData["host_time"]["ns_since_start"])
                 rowDict["HOST END TS"] = int(opData["host_time"]["ns_since_start"]) + int(
                     opData["host_time"]["exec_time_ns"]
                 )

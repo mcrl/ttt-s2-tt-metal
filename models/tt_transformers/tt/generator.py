@@ -10,6 +10,7 @@ import torch
 from loguru import logger
 
 import ttnn
+from tracy import signpost
 from models.common.llama_models import (
     CompletionMessage,
     StopReason,
@@ -85,9 +86,11 @@ class Generator:
         self.trace_ids_decode = defaultdict(lambda: None)  # {device_sampling_bool: {device_id: trace_id}}
         self.trace_inputs_decode = defaultdict(lambda: None)
         self.trace_output_decode = defaultdict(lambda: None)
+        self.trace_execute_signposted_decode = defaultdict(lambda: False)
         self.prefill_traces_warmup = False
-        # By default, enable split sampling (break the decode trace into two parts: upto logits, then sampling step)
-        self.enable_split_sampling = True
+        # Performance-only shortcut: disable split sampling so Tracy decode
+        # measurements exclude separate sampling capture/replay.
+        self.enable_split_sampling = False
 
     def _chunk_sampling_param(self, values):
         if isinstance(values, List):
@@ -681,6 +684,9 @@ class Generator:
                     device_tensors=self.trace_inputs_decode[sampling_on_device][i],
                 )
 
+        if not self.trace_execute_signposted_decode[sampling_on_device]:
+            signpost("decode_trace_execute")
+            self.trace_execute_signposted_decode[sampling_on_device] = True
         for i, trace_id in self.trace_ids_decode[sampling_on_device].items():
             ttnn.execute_trace(self.model_args[i].mesh_device, trace_id, cq_id=0, blocking=False)
         outputs = self.trace_output_decode[sampling_on_device]

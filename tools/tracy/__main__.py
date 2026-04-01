@@ -2,6 +2,7 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+import shlex
 from pathlib import Path
 
 from tracy import *
@@ -306,10 +307,9 @@ def main():
                 sys.stdout = None
                 sys.exit(exc.errno)
         else:
-            originalArgs.remove("-r")
-            osCmd = " ".join(originalArgs[1:])
-
-            testCommand = f"python3 -m tracy {osCmd}"
+            rerun_args = originalArgs[1:].copy()
+            rerun_args.remove("-r")
+            testCommand = [sys.executable, "-m", "tracy", *rerun_args]
 
             envVars = dict(os.environ)
             if options.device:
@@ -321,8 +321,8 @@ def main():
             if port:
                 envVars["TRACY_PORT"] = port
 
-            testProcess = subprocess.Popen([testCommand], shell=True, env=envVars, preexec_fn=os.setsid)
-            logger.info(f"Test process started")
+            testProcess = subprocess.Popen(testCommand, env=envVars, preexec_fn=os.setsid)
+            logger.info(f"Test process started: {shlex.join(testCommand)}")
 
             def signal_handler(sig, frame):
                 os.killpg(os.getpgid(testProcess.pid), signal.SIGTERM)
@@ -335,7 +335,7 @@ def main():
 
             testProcess.communicate()
             if options.check_exit_code and testProcess.returncode != 0:
-                logger.error(f"{testCommand} exited with a non-zero return code")
+                logger.error(f"{shlex.join(testCommand)} exited with a non-zero return code")
                 sys.exit(4)
 
             try:
