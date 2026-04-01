@@ -14,6 +14,7 @@ import pytest
 import requests
 import torch
 from loguru import logger
+from tracy import signpost
 
 import ttnn
 from models.common.utility_functions import is_wormhole_b0
@@ -964,6 +965,7 @@ def test_demo_text(
             logger.info("Finished prefill warmup")
 
             logger.info(f"Starting prefill...")
+            signpost("prefill_actual")
             profiler.start(f"inference_prefill", iteration=batch_idx)
             logits = generator.prefill_forward_text(
                 input_tokens_prefill_pt,
