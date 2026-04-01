@@ -35,6 +35,7 @@ target_sources(
         group_attn_matmul/device/group_attn_matmul_device_operation.cpp
         group_attn_matmul/device/group_attn_matmul_program_factory.cpp
         group_attn_matmul/group_attn_matmul.cpp
+        optimized_matmul/optimized_matmul.cpp
 )
 
 target_include_directories(ttnn_op_experimental_matmul PRIVATE ${FixmeOpIncDirs})
@@ -43,6 +44,7 @@ target_link_libraries(
     PRIVATE
         TT::Metalium
         TTNN::Core
+        TTNN::Ops::Matmul
 )
 
 install(

@@ -56,6 +56,11 @@ ttnn.attach_golden_function(
     golden_function=_golden_function,
 )
 
+ttnn.attach_golden_function(
+    ttnn.experimental.optimized_matmul,
+    golden_function=_golden_function,
+)
+
 
 def _golden_function(
     input_tensor_a,
