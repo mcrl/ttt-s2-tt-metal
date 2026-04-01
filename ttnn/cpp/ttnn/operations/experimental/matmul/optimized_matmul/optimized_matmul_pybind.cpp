@@ -22,8 +22,14 @@ void bind_optimized_matmul(py::module& module) {
         R"doc(
             Performs matrix multiplication for two tensors through the experimental optimized_matmul API.
 
-            This native op is intentionally registered as a distinct experimental entrypoint so it can
-            evolve independently from ttnn.matmul while keeping a stable Python API.
+            This native op is intentionally registered as a distinct experimental entrypoint with its own
+            minimal device program path under optimized_matmul/.
+
+            Current constraints:
+            - input_tensor_a must use ttnn.DRAM_MEMORY_CONFIG
+            - input_tensor_b must use ttnn.DRAM_MEMORY_CONFIG
+            - output is always produced with ttnn.DRAM_MEMORY_CONFIG
+            - both inputs must be device TILE tensors
         )doc",
         ttnn::pybind_overload_t{
             [](const OperationType& self, const Tensor& input_tensor_a, const Tensor& input_tensor_b) {

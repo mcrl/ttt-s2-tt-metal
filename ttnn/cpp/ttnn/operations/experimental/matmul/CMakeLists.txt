@@ -15,6 +15,7 @@ file(
     GLOB_RECURSE kernels
     attn_matmul/device/kernels/*
     group_attn_matmul/device/kernels/*
+    optimized_matmul/device/kernels/*
 )
 
 target_sources(
@@ -35,6 +36,8 @@ target_sources(
         group_attn_matmul/device/group_attn_matmul_device_operation.cpp
         group_attn_matmul/device/group_attn_matmul_program_factory.cpp
         group_attn_matmul/group_attn_matmul.cpp
+        optimized_matmul/device/optimized_matmul_device_operation.cpp
+        optimized_matmul/device/optimized_matmul_program_factory.cpp
         optimized_matmul/optimized_matmul.cpp
 )
 

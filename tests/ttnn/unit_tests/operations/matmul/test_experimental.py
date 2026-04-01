@@ -55,6 +55,46 @@ def test_ttnn_matmul(device, m_size, k_size, n_size):
     assert_with_pcc(torch_output_tensor, output_tensor)
 
 
+@pytest.mark.skipif(is_wormhole_b0() or is_blackhole(), reason="Unsupported on WH and BH")
+@pytest.mark.parametrize("m_size", [32])
+@pytest.mark.parametrize("k_size", [32])
+@pytest.mark.parametrize("n_size", [32])
+def test_ttnn_optimized_matmul(device, m_size, k_size, n_size):
+    torch.manual_seed(0)
+
+    torch_input_tensor_a = torch_random((1, 1, m_size, k_size), -1, 1, dtype=torch.bfloat16)
+    torch_input_tensor_b = torch_random((1, 1, k_size, n_size), -1, 1, dtype=torch.bfloat16)
+    torch_output_tensor = torch_input_tensor_a @ torch_input_tensor_b
+
+    input_tensor_a = ttnn.from_torch(torch_input_tensor_a, device=device, layout=ttnn.TILE_LAYOUT)
+    input_tensor_b = ttnn.from_torch(torch_input_tensor_b, device=device, layout=ttnn.TILE_LAYOUT)
+    output_tensor = ttnn.experimental.optimized_matmul(input_tensor_a, input_tensor_b)
+
+    assert output_tensor.memory_config() == ttnn.DRAM_MEMORY_CONFIG
+
+    output_tensor = ttnn.to_torch(output_tensor)
+
+    assert_with_pcc(torch_output_tensor, output_tensor)
+
+
+@pytest.mark.skipif(is_wormhole_b0() or is_blackhole(), reason="Unsupported on WH and BH")
+def test_ttnn_optimized_matmul_rejects_non_dram_inputs(device):
+    torch.manual_seed(0)
+
+    torch_input_tensor_a = torch_random((1, 1, 32, 32), -1, 1, dtype=torch.bfloat16)
+    torch_input_tensor_b = torch_random((1, 1, 32, 32), -1, 1, dtype=torch.bfloat16)
+
+    input_tensor_a = ttnn.from_torch(
+        torch_input_tensor_a, device=device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG
+    )
+    input_tensor_b = ttnn.from_torch(
+        torch_input_tensor_b, device=device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG
+    )
+
+    with pytest.raises(RuntimeError, match="optimized_matmul currently supports only DRAM interleaved input"):
+        ttnn.experimental.optimized_matmul(input_tensor_a, input_tensor_b)
+
+
 @pytest.mark.requires_fast_runtime_mode_off
 @pytest.mark.parametrize("input_a_is_sharded", [True, False])
 @pytest.mark.parametrize("output_is_sharded", [True, False])

@@ -38,6 +38,7 @@ constexpr std::array<std::tuple<uint32_t, uint32_t>, 20> SUBBLOCK_HW_CHOICES = {
 }};
 
 constexpr uint32_t NARROW_SHAPE_RATIO_THRESHOLD = 8;
+constexpr uint32_t DEFAULT_2D_REUSE_IN0_BLOCK_W_CAP = 16;
 
 // This function helps determine if an optimised 1D MM config will provide perf benefits for a matmul
 bool is_narrow_shape(uint32_t height, uint32_t width, bool all_dram) {
@@ -82,6 +83,19 @@ uint32_t estimate_interm_tile_size(
     uint32_t output_tile_size = tt::tile_size(output_data_format);
     result = std::max(output_tile_size, result);
     return result;
+}
+
+inline uint32_t cap_in0_block_w(uint32_t in0_block_w, const std::optional<uint32_t> in0_block_w_cap) {
+    if (!in0_block_w_cap.has_value()) {
+        return in0_block_w;
+    }
+
+    TT_FATAL(in0_block_w_cap.value() > 0, "in0_block_w_cap must be greater than zero");
+    uint32_t capped_in0_block_w = std::min(in0_block_w, in0_block_w_cap.value());
+    while (capped_in0_block_w > 1 && (in0_block_w % capped_in0_block_w) != 0) {
+        --capped_in0_block_w;
+    }
+    return capped_in0_block_w;
 }
 
 bool get_broadcast_batch(
@@ -510,7 +524,8 @@ inline MatmulProgramConfig create_simple_matmul_program_config(
     const std::optional<const ttnn::DeviceComputeKernelConfig> compute_kernel_config,
     const CoreCoord& compute_with_storage_grid_size,
     const MemoryConfig& mem_config,
-    const tt::tt_metal::DataType output_dtype) {
+    const tt::tt_metal::DataType output_dtype,
+    const std::optional<uint32_t> in0_block_w_cap = std::nullopt) {
     const auto& ashape = input_tensor_a.padded_shape();
     const auto& bshape = input_tensor_b.padded_shape();
 
@@ -615,6 +630,7 @@ inline MatmulProgramConfig create_simple_matmul_program_config(
             if (all_dram_interleaved) {
                 in0_block_w = !transpose_mcast ? (Kt % num_cores_x == 0 ? Kt / num_cores_x : 1)
                                                : (Kt % num_cores_x == 0 ? Kt / num_cores_y : 1);
+                in0_block_w = cap_in0_block_w(in0_block_w, in0_block_w_cap);
                 per_core_M = !transpose_mcast ? tt::div_up(Mt, num_cores_y) : tt::div_up(Mt, num_cores_x);
                 per_core_N = !transpose_mcast ? tt::div_up(Nt, num_cores_x) : tt::div_up(Nt, num_cores_y);
 
@@ -653,6 +669,79 @@ inline MatmulProgramConfig create_simple_matmul_program_config(
         }
     }
     return MatmulMultiCoreProgramConfig{};
+}
+
+inline MatmulMultiCoreReuseMultiCastProgramConfig create_forced_simple_matmul_2d_reuse_program_config(
+    const Tensor& input_tensor_a,
+    const Tensor& input_tensor_b,
+    const uint32_t bias_single_tile_size,
+    const std::optional<UnaryWithParam>& fused_activation,
+    const CoreCoord& compute_with_storage_grid_size,
+    const std::optional<const ttnn::DeviceComputeKernelConfig> compute_kernel_config,
+    const MemoryConfig& output_mem_config,
+    const tt::tt_metal::DataType output_dtype,
+    const std::optional<uint32_t> in0_block_w_cap = std::nullopt) {
+    const auto& ashape = input_tensor_a.padded_shape();
+    const auto& bshape = input_tensor_b.padded_shape();
+    auto in0_tile_shape = input_tensor_a.tensor_spec().tile().get_tile_shape();
+    auto in1_tile_shape = input_tensor_b.tensor_spec().tile().get_tile_shape();
+
+    TT_FATAL(!input_tensor_a.is_sharded(), "Forced 2D reuse resolver only supports non-sharded input A");
+
+    const uint32_t Mt = ashape[-2] / in0_tile_shape[0];
+    const uint32_t Kt = ashape[-1] / in0_tile_shape[1];
+    const uint32_t Nt = bshape[-1] / in1_tile_shape[1];
+    const uint32_t num_cores_x = compute_with_storage_grid_size.x;
+    const uint32_t num_cores_y = compute_with_storage_grid_size.y;
+
+    const bool all_interleaved =
+        input_tensor_a.memory_config().memory_layout() == TensorMemoryLayout::INTERLEAVED &&
+        output_mem_config.memory_layout() == TensorMemoryLayout::INTERLEAVED &&
+        input_tensor_b.memory_config().memory_layout() == TensorMemoryLayout::INTERLEAVED;
+    const bool all_dram = input_tensor_a.memory_config().buffer_type() == BufferType::DRAM &&
+                          input_tensor_b.memory_config().buffer_type() == BufferType::DRAM &&
+                          output_mem_config.buffer_type() == BufferType::DRAM;
+    TT_FATAL(
+        all_dram && all_interleaved,
+        "Forced 2D reuse resolver currently supports only DRAM-interleaved inputs and outputs");
+
+    uint32_t k_tiles_per_core = Kt % num_cores_x == 0 ? Kt / num_cores_x : 1;
+    k_tiles_per_core = cap_in0_block_w(k_tiles_per_core, in0_block_w_cap);
+    uint32_t m_tiles_per_core = tt::div_up(Mt, num_cores_y);
+    uint32_t n_tiles_per_core = tt::div_up(Nt, num_cores_x);
+
+    auto mutlti_dim_per_core_factor = get_multi_dim_per_core_factor(
+        input_tensor_a,
+        input_tensor_b,
+        bias_single_tile_size,
+        m_tiles_per_core,
+        n_tiles_per_core,
+        k_tiles_per_core,
+        estimate_interm_tile_size(compute_kernel_config, output_dtype),
+        /*adjust_in0_block_w=*/true);
+    uint32_t out_block_h = mutlti_dim_per_core_factor[0];
+    uint32_t out_block_w = mutlti_dim_per_core_factor[1];
+    k_tiles_per_core = mutlti_dim_per_core_factor[2];
+
+    bool fp32_dest_acc_en = get_fp32_dest_acc_en(compute_kernel_config);
+    auto subblock_hw =
+        bmm_op_utils::get_matmul_subblock_params(out_block_h, out_block_w, false, false, fp32_dest_acc_en);
+    uint32_t out_subblock_h = std::get<0>(subblock_hw);
+    uint32_t out_subblock_w = std::get<1>(subblock_hw);
+
+    return MatmulMultiCoreReuseMultiCastProgramConfig{
+        .compute_with_storage_grid_size = {num_cores_x, num_cores_y},
+        .in0_block_w = k_tiles_per_core,
+        .out_subblock_h = out_subblock_h,
+        .out_subblock_w = out_subblock_w,
+        .out_block_h = out_block_h,
+        .out_block_w = out_block_w,
+        .per_core_M = m_tiles_per_core,
+        .per_core_N = n_tiles_per_core,
+        .transpose_mcast = false,
+        .fused_activation = fused_activation,
+        .fuse_batch = false,
+    };
 }
 
 MatmulProgramConfig create_matmul_program_config(
@@ -707,8 +796,7 @@ MatmulProgramConfig create_matmul_program_config(
         if (!a_is_sharded && !input_tensor_b.is_sharded()) {
             m_tiles_per_core = div_up(m_size, ttnn::TILE_SIZE);
             n_tiles_per_core = div_up(n_size, ttnn::TILE_SIZE);
-            k_tiles_per_core = 1;  // TODO(arakhmati): Can it be more than 1 without
-                                   // running out of memory?
+            k_tiles_per_core = 1;
             if (!can_cbs_fit_in_l1(
                     input_tensor_a,
                     input_tensor_b,
@@ -782,7 +870,7 @@ MatmulProgramConfig create_matmul_program_config(
     if (!a_is_sharded) {
         m_tiles_per_core = (uint32_t)std::ceil((((double)batch_size_a * m_size) / ttnn::TILE_SIZE) / core_coord.y);
         n_tiles_per_core = (uint32_t)std::ceil((double)n_size / ttnn::TILE_SIZE / core_coord.x);
-        k_tiles_per_core = 4;  // TODO(arakhmati): What is a good starting point?
+        k_tiles_per_core = 4;
         while ((k_size / ttnn::TILE_SIZE) % k_tiles_per_core != 0) {
             k_tiles_per_core -= 1;
         }
@@ -1464,6 +1552,76 @@ Matmul create_matmul_struct(
         output_tile,
         parameters.global_cb,
         parameters.sub_device_id};
+}
+
+MatmulMultiCoreReuseMultiCastProgramConfig resolve_matmul_2d_reuse_program_config(
+    const Tensor& input_tensor_a,
+    const Tensor& input_tensor_b,
+    const std::optional<const Tensor>& bias,
+    const struct Matmul& parameters,
+    const std::optional<Tensor>& optional_output_tensor) {
+    return resolve_matmul_2d_reuse_program_config(
+        input_tensor_a,
+        input_tensor_b,
+        bias,
+        parameters,
+        optional_output_tensor,
+        DEFAULT_2D_REUSE_IN0_BLOCK_W_CAP);
+}
+
+MatmulMultiCoreReuseMultiCastProgramConfig resolve_matmul_2d_reuse_program_config(
+    const Tensor& input_tensor_a,
+    const Tensor& input_tensor_b,
+    const std::optional<const Tensor>& bias,
+    const struct Matmul& parameters,
+    const std::optional<Tensor>& optional_output_tensor,
+    const std::optional<uint32_t> in0_block_w_cap) {
+    if (parameters.program_config.has_value()) {
+        TT_FATAL(
+            !in0_block_w_cap.has_value(),
+            "resolve_matmul_2d_reuse_program_config does not accept in0_block_w_cap when program_config is "
+            "already specified");
+        TT_FATAL(
+            std::holds_alternative<MatmulMultiCoreReuseMultiCastProgramConfig>(parameters.program_config.value()),
+            "resolve_matmul_2d_reuse_program_config only accepts 2D reuse program configs, got: {}",
+            parameters.program_config.value());
+        return std::get<MatmulMultiCoreReuseMultiCastProgramConfig>(parameters.program_config.value());
+    }
+
+    uint32_t bias_single_tile_size = 0;
+    if (bias.has_value()) {
+        auto bias_data_format = tt_metal::datatype_to_dataformat_converter(bias->dtype());
+        bias_single_tile_size = tt::tile_size(bias_data_format);
+    }
+
+    auto resolved_parameters =
+        create_matmul_struct(input_tensor_a, input_tensor_b, parameters, {optional_output_tensor});
+    const auto core_coord =
+        resolved_parameters.user_core_coord.value_or(input_tensor_a.device()->compute_with_storage_grid_size());
+    auto auto_program_config = create_simple_matmul_program_config(
+        input_tensor_a,
+        input_tensor_b,
+        bias_single_tile_size,
+        resolved_parameters.compute_kernel_config,
+        core_coord,
+        resolved_parameters.output_mem_config,
+        resolved_parameters.output_dtype.value_or(input_tensor_a.dtype()),
+        in0_block_w_cap);
+    if (std::holds_alternative<MatmulMultiCoreReuseMultiCastProgramConfig>(auto_program_config)) {
+        auto program_config = std::get<MatmulMultiCoreReuseMultiCastProgramConfig>(auto_program_config);
+        program_config.fused_activation = resolved_parameters.user_fused_activation;
+        return program_config;
+    }
+    return create_forced_simple_matmul_2d_reuse_program_config(
+        input_tensor_a,
+        input_tensor_b,
+        bias_single_tile_size,
+        resolved_parameters.user_fused_activation,
+        core_coord,
+        resolved_parameters.compute_kernel_config,
+        resolved_parameters.output_mem_config,
+        resolved_parameters.output_dtype.value_or(input_tensor_a.dtype()),
+        in0_block_w_cap);
 }
 
 Tensor matmul(

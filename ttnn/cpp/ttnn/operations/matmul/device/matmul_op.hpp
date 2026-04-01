@@ -281,6 +281,28 @@ Matmul create_matmul_struct(
     const struct Matmul& parameters,
     const std::vector<std::optional<Tensor>>& optional_output_tensors = {std::nullopt});
 
+/**
+ * Resolve the 2D reuse+mcast program config for these inputs without
+ * launching the operation.
+ *
+ * The default resolver path applies an in0_block_w cap of 16 before
+ * rerunning the 2D block-size search.
+ */
+MatmulMultiCoreReuseMultiCastProgramConfig resolve_matmul_2d_reuse_program_config(
+    const Tensor& input_tensor_a,
+    const Tensor& input_tensor_b,
+    const std::optional<const Tensor>& bias = std::nullopt,
+    const struct Matmul& parameters = Matmul{},
+    const std::optional<Tensor>& optional_output_tensor = std::nullopt);
+
+MatmulMultiCoreReuseMultiCastProgramConfig resolve_matmul_2d_reuse_program_config(
+    const Tensor& input_tensor_a,
+    const Tensor& input_tensor_b,
+    const std::optional<const Tensor>& bias,
+    const struct Matmul& parameters,
+    const std::optional<Tensor>& optional_output_tensor,
+    const std::optional<uint32_t> in0_block_w_cap);
+
 struct SparseMatmul {
     const std::optional<uint32_t> nnz;
     bool is_input_a_sparse;

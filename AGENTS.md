@@ -12,6 +12,10 @@ Before starting work in this repository, always read:
 
 `$HOME/ttt-s2/AGENTS.md`
 
+For LLM model code in this repository, refer to:
+
+`models/tt_transformers`
+
 ## Origin
 
 The canonical origin for this fork is:
@@ -49,7 +53,7 @@ ttnn.experimental.optimized_matmul(A, B)
 
 `optimized_matmul` is implemented as a new C++ native experimental operation, not as a Python wrapper.
 
-At the moment, the operation is exposed as its own experimental entry point and currently delegates internally to `ttnn::matmul`. This keeps the API distinct while making it straightforward to replace the implementation later with a dedicated optimized kernel or specialized execution path.
+The public experimental API now calls a dedicated primitive device operation with its own minimal program path and local kernels under the `optimized_matmul/` subtree. The current goal is simplicity and path bring-up, not performance.
 
 ### Primary implementation files
 
@@ -57,6 +61,13 @@ At the moment, the operation is exposed as its own experimental entry point and 
 - `ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/optimized_matmul.cpp`
 - `ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/optimized_matmul_pybind.hpp`
 - `ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/optimized_matmul_pybind.cpp`
+- `ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/device/optimized_matmul_device_operation.hpp`
+- `ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/device/optimized_matmul_device_operation.cpp`
+- `ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/device/optimized_matmul_program_factory.cpp`
+- `ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/device/kernels/dataflow/reader_optimized_matmul.cpp`
+- `ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/device/kernels/dataflow/pad_tile.hpp`
+- `ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/device/kernels/dataflow/writer_optimized_matmul.cpp`
+- `ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/device/kernels/compute/optimized_bmm.cpp`
 
 ### Integration files modified for registration and build wiring
 

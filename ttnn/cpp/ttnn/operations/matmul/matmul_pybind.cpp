@@ -227,6 +227,64 @@ void py_module(py::module& module) {
         for operations with large batch sizes. Defaults to true.
     )doc");
 
+    module.def(
+        "resolve_matmul_2d_reuse_program_config",
+        [](const ttnn::Tensor& input_tensor_a,
+           const ttnn::Tensor& input_tensor_b,
+           const std::optional<const ttnn::Tensor>& bias,
+           const bool transpose_a,
+           const bool transpose_b,
+           const std::optional<const ttnn::MemoryConfig>& memory_config,
+           const std::optional<const DataType> dtype,
+           const std::optional<const ::ttnn::Activation>& activation,
+           const std::optional<const DeviceComputeKernelConfig> compute_kernel_config,
+           const std::optional<const ttnn::CoreGrid> core_grid,
+           const std::optional<const tt::tt_metal::Tile>& output_tile,
+           const std::optional<uint32_t> in0_block_w_cap) {
+            std::optional<CoreCoord> user_core_coord = std::nullopt;
+            if (core_grid.has_value()) {
+                user_core_coord = CoreCoord(core_grid->x, core_grid->y);
+            }
+
+            return ttnn::operations::matmul::resolve_matmul_2d_reuse_program_config(
+                input_tensor_a,
+                input_tensor_b,
+                bias,
+                Matmul{
+                    .output_mem_config = memory_config.value_or(ttnn::DRAM_MEMORY_CONFIG),
+                    .output_dtype = dtype,
+                    .compute_kernel_config = compute_kernel_config,
+                    .user_core_coord = user_core_coord,
+                    .user_fused_activation = get_fused_activation(activation),
+                    .transpose_a = transpose_a,
+                    .transpose_b = transpose_b,
+                    .output_tile = output_tile,
+                },
+                std::nullopt,
+                in0_block_w_cap);
+        },
+        py::arg("input_tensor_a"),
+        py::arg("input_tensor_b"),
+        py::kw_only(),
+        py::arg("bias") = std::nullopt,
+        py::arg("transpose_a") = false,
+        py::arg("transpose_b") = false,
+        py::arg("memory_config") = std::nullopt,
+        py::arg("dtype") = std::nullopt,
+        py::arg("activation") = std::nullopt,
+        py::arg("compute_kernel_config") = std::nullopt,
+        py::arg("core_grid") = std::nullopt,
+        py::arg("output_tile") = std::nullopt,
+        py::arg("in0_block_w_cap") = 16,
+        R"doc(
+        Resolves the 2D reuse matmul program config for the given tensors without launching the operation.
+
+        This follows the TTNN 2D reuse resolver path and returns a
+        ``MatmulMultiCoreReuseMultiCastProgramConfig`` that can be passed back into
+        :func:`ttnn.matmul` via the ``program_config`` argument. When ``in0_block_w_cap`` is set,
+        the resolver caps the initial K blocking factor before re-running its 2D block-size search.
+    )doc");
+
     auto matmul_multi_core_reuse_multicast_1d_program_config =
         tt_serializable_class<MatmulMultiCoreReuseMultiCast1DProgramConfig>(
             module, "MatmulMultiCoreReuseMultiCast1DProgramConfig", R"doc(
