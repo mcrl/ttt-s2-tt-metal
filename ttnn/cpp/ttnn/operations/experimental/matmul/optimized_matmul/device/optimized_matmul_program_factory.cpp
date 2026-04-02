@@ -12,6 +12,7 @@
 #include <tt-metalium/host_api.hpp>
 
 #include "optimized_matmul_config.hpp"
+#include "optimized_matmul_schedule.hpp"
 
 namespace ttnn::operations::experimental::matmul::optimized_matmul {
 
@@ -20,11 +21,21 @@ using namespace tt::constants;
 
 namespace {
 
+OptimizedMatmulVariantSpec get_program_factory_variant_spec_from_attributes(
+    const OptimizedMatmulDeviceOperation::operation_attributes_t& operation_attributes) {
+    return {
+        .optimized_a_read = operation_attributes.optimized_a_read,
+        .optimized_b_read = operation_attributes.optimized_b_read,
+        .optimized_write = operation_attributes.optimized_write,
+        .packer_l1_acc = operation_attributes.packer_l1_acc,
+        .optimized_write_use_generated_schedule = operation_attributes.optimized_write_use_generated_schedule,
+        .active_grid = tt::tt_metal::CoreCoord{operation_attributes.active_grid_x, operation_attributes.active_grid_y},
+    };
+}
+
 constexpr uint32_t kInputPipelineDepth = 2;
 constexpr uint32_t kOutputPipelineDepth = 1;
 constexpr uint32_t kSyncPageSize = 4;
-constexpr auto kScheduleHeaderIncludePath = "\"schedules/wormhole_b0_8x8_schedule.hpp\"";
-
 tt::tt_metal::CoreRange get_active_cores(const OptimizedMatmulDeviceOperation::operation_attributes_t& attributes) {
     return tt::tt_metal::CoreRange({0, 0}, {attributes.active_grid_x - 1, attributes.active_grid_y - 1});
 }
@@ -52,10 +63,9 @@ void create_sync_circular_buffer(
     CreateCircularBuffer(program, cores, cb_config);
 }
 
-std::map<std::string, std::string> create_kernel_defines(const uint32_t variant_id) {
-    auto defines = get_optimized_matmul_kernel_defines(
-        get_optimized_matmul_variant_spec(static_cast<OptimizedMatmulVariantId>(variant_id)));
-    defines["TTT_DMVK_SCHEDULE_HEADER"] = kScheduleHeaderIncludePath;
+std::map<std::string, std::string> create_kernel_defines(const OptimizedMatmulVariantSpec& variant_spec) {
+    auto defines = get_optimized_matmul_kernel_defines(variant_spec);
+    defines["TTT_DMVK_SCHEDULE_HEADER"] = get_optimized_matmul_schedule_header_include_path(variant_spec.active_grid);
     return defines;
 }
 
@@ -83,6 +93,7 @@ OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::create(
         operation_attributes.output_memory_config,
         output_tensor.memory_config());
 
+    const auto variant_spec = get_program_factory_variant_spec_from_attributes(operation_attributes);
     const auto resolved_config = resolve_optimized_matmul_config(
         input_tensor_a,
         input_tensor_b,
@@ -122,7 +133,7 @@ OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::create(
         operation_attributes.active_grid_y,
     };
 
-    const auto kernel_defines = create_kernel_defines(operation_attributes.variant_id);
+    const auto kernel_defines = create_kernel_defines(variant_spec);
 
     const auto dmvk_noc0_kernel_id = CreateKernel(
         program,
@@ -164,7 +175,7 @@ OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::create(
         "ttnn/cpp/ttnn/operations/experimental/matmul/optimized_matmul/device/kernels/compute/optimized_bmm.cpp",
         all_cores,
         ComputeConfig{
-            .math_fidelity = MathFidelity::HiFi4,
+            .math_fidelity = operation_attributes.math_fidelity,
             .compile_args = compute_compile_args,
             .defines = kernel_defines});
 

@@ -8,8 +8,11 @@
 
 namespace ttnn::operations::experimental::matmul {
 
-ttnn::Tensor OptimizedMatmulOperation::invoke(const Tensor& input_tensor_a, const Tensor& input_tensor_b) {
-    return ttnn::prim::optimized_matmul(input_tensor_a, input_tensor_b);
+ttnn::Tensor OptimizedMatmulOperation::invoke(
+    const Tensor& input_tensor_a,
+    const Tensor& input_tensor_b,
+    std::optional<const DeviceComputeKernelConfig> compute_kernel_config) {
+    return ttnn::prim::optimized_matmul(input_tensor_a, input_tensor_b, compute_kernel_config);
 }
 
 }  // namespace ttnn::operations::experimental::matmul

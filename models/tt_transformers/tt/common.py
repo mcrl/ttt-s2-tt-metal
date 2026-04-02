@@ -16,6 +16,9 @@ from pydantic import AliasChoices, BaseModel, Field
 
 import ttnn
 
+def use_optimized_matmul():
+    """Check if optimized matmul is enabled via environment variable."""
+    return os.getenv("TTT_OPTIMIZED_MATMUL", "0") == "1"
 
 class HostEmbedding(torch.nn.Module):
     def __init__(self, model_args):
@@ -142,6 +145,7 @@ def preprocess_inputs_prefill(
     instruct,
     max_generated_tokens,
     max_prefill_len=128 * 1024,
+    fixed_prefill_len=None,
 ):
     """
     Run tokenizer on inputs, and create embeddings for the first token of each input
@@ -207,6 +211,24 @@ def preprocess_inputs_prefill(
         prompt_lens = [len(x) for x in encoded_prompts]
         min_prompt_len = min(prompt_lens)
         max_prompt_len = max(prompt_lens)
+
+    if fixed_prefill_len is not None:
+        if fixed_prefill_len <= 0:
+            raise ValueError(f"fixed_prefill_len must be > 0, got {fixed_prefill_len}")
+        if fixed_prefill_len > max_prefill_len:
+            raise ValueError(
+                f"fixed_prefill_len ({fixed_prefill_len}) exceeds max_prefill_len ({max_prefill_len})"
+            )
+
+        logger.info(f"Forcing prefill prompt length to fixed_prefill_len={fixed_prefill_len}")
+        encoded_prompts = [
+            (encod[-fixed_prefill_len:] if len(encod) > fixed_prefill_len else encod + ([0] * (fixed_prefill_len - len(encod))))
+            for encod in encoded_prompts
+        ]
+        prompt_lens = [len(x) for x in encoded_prompts]
+        min_prompt_len = min(prompt_lens)
+        max_prompt_len = max(prompt_lens)
+
     for m in model_args:
         assert (
             max_prompt_len <= m.max_seq_len

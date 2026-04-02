@@ -82,28 +82,31 @@ uint8_t sync_noc = 0;
 // OPTIMIZED_A_READ, OPTIMIZED_B_READ, OPTIMIZED_WRITE, PACKER_L1_ACC
 // SKIP_READ, SKIP_BCAST, SKIP_WRITE, SKIP_COMPUTE
 
+FORCE_INLINE uint32_t get_A_master_col();
+FORCE_INLINE uint32_t get_B_master_row();
+
 FORCE_INLINE bool is_A_reader() {
-    return my_noc == A_read_noc && x == (OPTIMIZED_A_READ ? A_MASTER_COL[y] : 0);
+    return my_noc == A_read_noc && x == get_A_master_col();
 }
 
 FORCE_INLINE bool is_B_reader() {
-    return my_noc == B_read_noc && y == (OPTIMIZED_B_READ ? B_MASTER_ROW[x] : 0);
+    return my_noc == B_read_noc && y == get_B_master_row();
 }
 
 FORCE_INLINE bool is_A_sender() {
-    return my_noc == A_bcast_noc && x == (OPTIMIZED_A_READ ? A_MASTER_COL[y] : 0);
+    return my_noc == A_bcast_noc && x == get_A_master_col();
 }
 
 FORCE_INLINE bool is_A_receiver() {
-    return my_noc == A_bcast_noc && x != (OPTIMIZED_A_READ ? A_MASTER_COL[y] : 0);
+    return my_noc == A_bcast_noc && x != get_A_master_col();
 }
 
 FORCE_INLINE bool is_B_sender() {
-    return my_noc == B_bcast_noc && y == (OPTIMIZED_B_READ ? B_MASTER_ROW[x] : 0);
+    return my_noc == B_bcast_noc && y == get_B_master_row();
 }
 
 FORCE_INLINE bool is_B_receiver() {
-    return my_noc == B_bcast_noc && y != (OPTIMIZED_B_READ ? B_MASTER_ROW[x] : 0);
+    return my_noc == B_bcast_noc && y != get_B_master_row();
 }
 
 FORCE_INLINE bool is_C_writer() {
@@ -126,6 +129,24 @@ FORCE_INLINE void sync_all() {
 
 FORCE_INLINE uint32_t ceil_div(const uint32_t value, const uint32_t divisor) {
     return (value + divisor - 1) / divisor;
+}
+
+FORCE_INLINE uint32_t get_A_master_col() {
+#if OPTIMIZED_A_READ
+    const uint32_t master_col = A_MASTER_COL[y];
+    return master_col < active_PW ? master_col : active_PW - 1;
+#else
+    return active_PW - 1;
+#endif
+}
+
+FORCE_INLINE uint32_t get_B_master_row() {
+#if OPTIMIZED_B_READ
+    const uint32_t master_row = B_MASTER_ROW[x];
+    return master_row < active_PH ? master_row : 0;
+#else
+    return 0;
+#endif
 }
 
 FORCE_INLINE uint32_t get_valid_block_h(const uint32_t row_bidx) {
@@ -238,7 +259,7 @@ FORCE_INLINE uint32_t C_repetition_idx(const uint32_t row_bidx,
 // A_read_optimized: compact scheduled multi-bank reads over fixed-size slots.
 FORCE_INLINE void A_read_optimized(uint32_t row_bidx, uint32_t k_bidx,
                                    uint32_t A_l1_ptr) {
-    if (x != A_MASTER_COL[y]) {
+    if (x != get_A_master_col()) {
         return;
     }
     const uint32_t repetition_base_bytes =
@@ -276,7 +297,7 @@ FORCE_INLINE void A_read_optimized(uint32_t row_bidx, uint32_t k_bidx,
 // B_read_optimized: compact scheduled multi-bank reads over fixed-size slots.
 FORCE_INLINE void B_read_optimized(uint32_t col_bidx, uint32_t k_bidx,
                                    uint32_t B_l1_ptr) {
-    if (y != B_MASTER_ROW[x]) {
+    if (y != get_B_master_row()) {
         return;
     }
     const uint32_t repetition_base_bytes =
@@ -699,7 +720,7 @@ void kernel_main() {
                 cb_push_back(A_cb, A_tiles_per_block);
 #if !SKIP_BCAST
                 broadcast_v2(A_l1_ptr, A_tiles_per_block * A_tile_bytes,
-                             OPTIMIZED_A_READ ? A_MASTER_COL[y] : active_PW - 1,
+                             get_A_master_col(),
                              y, GRID_START, y, active_PW - 1, y,
                              Amaster_sem, Aslave_sem, A_bcast_noc);
 #endif  // !SKIP_BCAST
@@ -707,7 +728,7 @@ void kernel_main() {
             if (is_A_receiver()) {
 #if !SKIP_BCAST
                 broadcast_v2(A_l1_ptr, A_tiles_per_block * A_tile_bytes,
-                             OPTIMIZED_A_READ ? A_MASTER_COL[y] : active_PW - 1,
+                             get_A_master_col(),
                              y, GRID_START, y, active_PW - 1, y,
                              Amaster_sem, Aslave_sem, A_bcast_noc);
 #endif  // !SKIP_BCAST
@@ -720,7 +741,7 @@ void kernel_main() {
                 cb_push_back(B_cb, B_tiles_per_block);
 #if !SKIP_BCAST
                 broadcast_v2(B_l1_ptr, B_tiles_per_block * B_tile_bytes, x,
-                             OPTIMIZED_B_READ ? B_MASTER_ROW[x] : 0,
+                             get_B_master_row(),
                              x, GRID_START, x, active_PH - 1,
                              Bmaster_sem, Bslave_sem, B_bcast_noc);
 #endif  // !SKIP_BCAST
@@ -728,7 +749,7 @@ void kernel_main() {
             if (is_B_receiver()) {
 #if !SKIP_BCAST
                 broadcast_v2(B_l1_ptr, B_tiles_per_block * B_tile_bytes, x,
-                             OPTIMIZED_B_READ ? B_MASTER_ROW[x] : 0,
+                             get_B_master_row(),
                              x, GRID_START, x, active_PH - 1,
                              Bmaster_sem, Bslave_sem, B_bcast_noc);
 #endif  // !SKIP_BCAST

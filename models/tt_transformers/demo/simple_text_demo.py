@@ -702,7 +702,7 @@ def prepare_generator_args(
 )
 @pytest.mark.parametrize(
     "device_params",
-    [{"fabric_config": True, "trace_region_size": 50000000, "num_command_queues": 1}],
+    [{"fabric_config": True, "trace_region_size": 50000000, "num_command_queues": 1, "physical_device_ids": [0]}],
     indirect=True,
 )
 @pytest.mark.parametrize(
@@ -932,21 +932,30 @@ def test_demo_text(
             decoding_pos,
             prefill_lens,
         ) = preprocess_inputs_prefill(
-            input_prompts, tokenizer, model_args, instruct, max_generated_tokens, max_prefill_len=max_seq_len
+            input_prompts,
+            tokenizer,
+            model_args,
+            instruct,
+            max_generated_tokens,
+            max_prefill_len=max_seq_len,
+            fixed_prefill_len=(
+                int(os.getenv("FIX_PREFILL_LEN")) if os.getenv("FIX_PREFILL_LEN") is not None else None
+            ),
         )
 
         max_encoded_prompt_len = max(len(p) for p in encoded_prompts)
+        decode_budget = 0 if mode == "prefill" else max_generated_tokens
         assert (
-            max_generated_tokens + max_encoded_prompt_len <= max_seq_len
-        ), f"Prompt prefill tokens ({max_encoded_prompt_len}) + maximum number of decoded iterations ({max_generated_tokens}) needs to be <= than max_seq_len ({max_seq_len})"
+            decode_budget + max_encoded_prompt_len <= max_seq_len
+        ), f"Prompt prefill tokens ({max_encoded_prompt_len}) + maximum number of decoded iterations ({decode_budget}) needs to be <= than max_seq_len ({max_seq_len})"
 
         if paged_attention:
             paged_cache_max_seq_len = (
                 page_params["page_block_size"] * page_params["page_max_num_blocks_per_dp"] / batch_size
             )
             assert (
-                max_generated_tokens + max_encoded_prompt_len <= paged_cache_max_seq_len
-            ), f"max_generated_tokens ({max_generated_tokens}) needs to be <= than paged_cache_max_seq_len ({paged_cache_max_seq_len})"
+                decode_budget + max_encoded_prompt_len <= paged_cache_max_seq_len
+            ), f"max_generated_tokens ({decode_budget}) needs to be <= than paged_cache_max_seq_len ({paged_cache_max_seq_len})"
         profiler.end(f"preprocess_prefill_inputs", iteration=batch_idx)
 
         # when doing repeating batches, set kv-caches to zero, to avoid context leaking

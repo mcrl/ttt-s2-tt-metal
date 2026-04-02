@@ -9,6 +9,7 @@ import torch
 import ttnn
 from models.common.lightweightmodule import LightweightModule
 from models.tt_transformers.tt.ccl import tt_all_reduce
+from models.tt_transformers.tt.common import use_optimized_matmul
 
 
 class LMHead(LightweightModule):
@@ -61,6 +62,7 @@ class LMHead(LightweightModule):
             )
 
         self.output_weights = []
+        self.output_weights_T = []
         if args.is_galaxy:
             cache_file_name = (
                 None if args.dummy_weights else weight_cache_path / f"output_lm_head_{num_splits}_split_shard_0"
@@ -70,11 +72,11 @@ class LMHead(LightweightModule):
 
             memory_config = (
                 ttnn.DRAM_MEMORY_CONFIG
-                if args.dim == 2048
-                else args.create_dram_sharded_mem_config(k=args.dim // 4, n=self.padded_vocab_size // 8)
+                # if args.dim == 2048
+                # else args.create_dram_sharded_mem_config(k=args.dim // 4, n=self.padded_vocab_size // 8)
+                # TTT (jinpyo) - always place weight tensor to DRAM - interleaved
             )
-            self.output_weights.append(  # (2k, 16k) 128* 1024
-                ttnn.as_tensor(
+            output_weight = ttnn.as_tensor(
                     padded_lm_head,
                     device=mesh_device,
                     mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, dims=(3, 2), mesh_shape=args.cluster_shape),
@@ -83,7 +85,8 @@ class LMHead(LightweightModule):
                     memory_config=memory_config,
                     cache_file_name=cache_file_name,
                 )
-            )
+            self.output_weights.append(output_weight)
+            self.output_weights_T.append(ttnn.transpose(output_weight, 0, 1))
         else:
             for i, split_size in enumerate(split_sizes):
                 # Create a list to store the split tensors for each device
@@ -101,11 +104,11 @@ class LMHead(LightweightModule):
                     if args.dummy_weights
                     else weight_cache_path / f"output_lm_head_{num_splits}_split_shard_{i}_{combined_split.shape[-1]}"
                 )
-                memory_config = args.create_dram_sharded_mem_config(
-                    k=args.dim, n=math.ceil(combined_split.shape[-1] / self.num_devices)
-                )
-                self.output_weights.append(
-                    ttnn.as_tensor(
+                # memory_config = args.create_dram_sharded_mem_config(
+                #     k=args.dim, n=math.ceil(combined_split.shape[-1] / self.num_devices)
+                # )
+                memory_config = ttnn.DRAM_MEMORY_CONFIG  # TTT (jinpyo) - always place weight tensor to DRAM - interleaved
+                output_weight = ttnn.as_tensor(
                         combined_split,
                         device=mesh_device,
                         mesh_mapper=ttnn.ShardTensorToMesh(mesh_device, dim=-1),
@@ -114,7 +117,8 @@ class LMHead(LightweightModule):
                         memory_config=memory_config,
                         cache_file_name=cache_file_name,
                     )
-                )
+                self.output_weights.append(output_weight)
+                self.output_weights_T.append(ttnn.transpose(output_weight, 0, 1))
 
         self.compute_kernel_config = ttnn.WormholeComputeKernelConfig(
             math_fidelity=ttnn.MathFidelity.HiFi2,
@@ -149,24 +153,40 @@ class LMHead(LightweightModule):
 
     def forward(self, x: ttnn.Tensor):
         outputs = []
-        for weight, pc in zip(self.output_weights, self.program_configs):
-            output = ttnn.linear(
-                x,
-                weight,
-                compute_kernel_config=self.compute_kernel_config,
-                program_config=pc,
-                memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
-                dtype=self.args.lm_head_dtype if hasattr(self.args, "lm_head_dtype") else ttnn.bfloat8_b,
-            )
-            outputs.append(
-                ttnn.sharded_to_interleaved(
-                    output, memory_config=self.model_config.get("LM_HEAD_OUTPUT_MEMCFG", ttnn.L1_MEMORY_CONFIG)
+        for weight, weight_T, pc in zip(self.output_weights, self.output_weights_T, self.program_configs):
+            if use_optimized_matmul(): # TTT
+                # print(f"[LMHead] Using optimized matmul {x.shape=}, {weight.shape=}")
+                # print(f"[LMHead] {ttnn.get_memory_config(x)=}")
+                # print(f"[LMHead] {ttnn.get_memory_config(weight)=}")
+                if x.shape[-2] == 32:
+                    x_T = ttnn.transpose(x.reshape((x.shape[-2], x.shape[-1])), 0, 1) # [1, 1, B, H] -> [H, B]
+                    output = ttnn.experimental.optimized_matmul(weight_T, x_T)
+                    output = ttnn.transpose(output, 0, 1).reshape((1, 1, x.shape[2], weight.shape[-1])) # [V/split, B] -> [1, 1, B, V/split]
+                else:
+                    output = ttnn.experimental.optimized_matmul(x, weight)
+                # print(f"[LMHead] Optimized matmul output {output.shape=}, {ttnn.get_memory_config(output)=}")
+            else:
+                output = ttnn.linear(
+                    x,
+                    weight,
+                    compute_kernel_config=self.compute_kernel_config,
+                    # program_config=pc, # TTT
+                    # memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,  # TTT (jinpyo)
+                    dtype=self.args.lm_head_dtype if hasattr(self.args, "lm_head_dtype") else ttnn.bfloat8_b,
                 )
+            outputs.append(
+                output
+                # ttnn.sharded_to_interleaved(
+                #     output, memory_config=self.model_config.get("LM_HEAD_OUTPUT_MEMCFG", ttnn.L1_MEMORY_CONFIG)
+                # )
+                # TTT (jinpyo)
             )
 
         # Concatenate the outputs
         output = ttnn.concat(
-            outputs, dim=-1, memory_config=self.model_config.get("LM_HEAD_OUTPUT_MEMCFG", ttnn.L1_MEMORY_CONFIG)
+            # outputs, dim=-1, memory_config=self.model_config.get("LM_HEAD_OUTPUT_MEMCFG", ttnn.L1_MEMORY_CONFIG)
+            outputs, dim=-1, memory_config=ttnn.DRAM_MEMORY_CONFIG # TTT
         )
 
         output = tt_all_reduce(

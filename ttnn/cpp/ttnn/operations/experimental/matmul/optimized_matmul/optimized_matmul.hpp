@@ -4,13 +4,19 @@
 
 #pragma once
 
+#include <optional>
+
 #include "ttnn/decorators.hpp"
+#include "ttnn/operations/core/compute_kernel/compute_kernel_config.hpp"
 #include "ttnn/tensor/tensor.hpp"
 
 namespace ttnn::operations::experimental::matmul {
 
 struct OptimizedMatmulOperation {
-    static ttnn::Tensor invoke(const Tensor& input_tensor_a, const Tensor& input_tensor_b);
+    static ttnn::Tensor invoke(
+        const Tensor& input_tensor_a,
+        const Tensor& input_tensor_b,
+        std::optional<const DeviceComputeKernelConfig> compute_kernel_config = std::nullopt);
 };
 
 }  // namespace ttnn::operations::experimental::matmul

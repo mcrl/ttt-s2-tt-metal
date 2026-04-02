@@ -11,7 +11,7 @@ from models.common.lightweightmodule import LightweightModule
 from models.common.rmsnorm import RMSNorm
 from models.tt_transformers.tt.ccl import tt_all_gather, tt_all_reduce
 from models.tt_transformers.tt.model_config import OpGroup, TensorGroup
-
+from models.tt_transformers.tt.common import use_optimized_matmul
 
 class Attention(LightweightModule):
     def __init__(
@@ -236,7 +236,8 @@ class Attention(LightweightModule):
             dtype=self.wqkv_dtype,
             layout=ttnn.TILE_LAYOUT,
             device=self.mesh_device,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG if self.TG else wqkv_mem_config,
+            # memory_config=ttnn.DRAM_MEMORY_CONFIG if self.TG else wqkv_mem_config,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG, # TTT(jinpyo) always place weight tensor to DRAM - interleaved
             mesh_mapper=ttnn.ShardTensor2dMesh(
                 self.mesh_device, dims=(3, 2) if self.TG else (2, 3), mesh_shape=configuration.cluster_shape
             ),
@@ -306,7 +307,8 @@ class Attention(LightweightModule):
             dtype=self.wo_dtype,
             layout=ttnn.TILE_LAYOUT,
             device=self.mesh_device,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG if (self.use_fused_all_gather_matmul or self.TG) else wo_mem_config,
+            # memory_config=ttnn.DRAM_MEMORY_CONFIG if (self.use_fused_all_gather_matmul or self.TG) else wo_mem_config,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG, # TTT(jinpyo) always place weight tensor to DRAM - interleaved
             mesh_mapper=ttnn.ShardTensor2dMesh(
                 self.mesh_device,
                 dims=(2, 3) if (self.use_fused_all_gather_matmul or self.TG) else (3, 2),
@@ -392,16 +394,30 @@ class Attention(LightweightModule):
         # QKV matmuls
         # Use HiFi2 for DRAM-sharded matmuls as they are otherwise flop-bound. Loses 1 bit of activation precision.
         ###
-
-        xqkv_fused_sharded = ttnn.linear(
-            x,
-            self.wqkv,
-            # bias=self.wqkv_bias,
-            memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
-            program_config=self.model_config["XQKV_DECODE_PROGCFG"],
-            compute_kernel_config=self.li_qkv_decode_compute_kernel_cfg,
-            dtype=self.ccl_dtype if self.TG else self.activation_dtype or ttnn.bfloat16,
-        )
+        if use_optimized_matmul():
+            # print(f"[QKV projection] Using optimized matmul {x.shape=}, {self.wqkv.shape=}")
+            # print(f"[QKV projection] {ttnn.get_memory_config(x)=}")
+            # print(f"[QKV projection] {ttnn.get_memory_config(self.wqkv)=}")
+            xqkv_fused_sharded = ttnn.experimental.optimized_matmul(x, self.wqkv)
+            # xqkv_fused_sharded = ttnn.to_memory_config(
+            # xqkv_fused_sharded,
+            # ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
+            # dtype=self.ccl_dtype if self.TG else self.activation_dtype or ttnn.bfloat16,
+            # )
+            # print(
+            #     f"[QKV projection] Optimized matmul output {xqkv_fused_sharded.shape=}, "
+            #     f"{ttnn.get_memory_config(xqkv_fused_sharded)=}"
+            # )
+        else:
+            xqkv_fused_sharded = ttnn.linear(
+                x,
+                self.wqkv,
+                # bias=self.wqkv_bias,
+                memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
+                program_config=self.model_config["XQKV_DECODE_PROGCFG"],
+                compute_kernel_config=self.li_qkv_decode_compute_kernel_cfg,
+                dtype=self.ccl_dtype if self.TG else self.activation_dtype or ttnn.bfloat16,
+            )
         # FIXME: File bug against dram-sharded matmuls with bias
         if self.wqkv_bias_decode:
             # select the bias tensor based on the number of tiles in the rows
@@ -615,15 +631,25 @@ class Attention(LightweightModule):
                 )
 
             # TODO: Fix this once self.TG supports dram-sharded matmuls
-            dense_out_sharded = ttnn.matmul(
-                attn_output,
-                self.wo,
-                core_grid=ttnn.CoreGrid(y=4, x=8) if self.TG else None,
-                program_config=self.model_config["ATTN_OUTPUT_PROGCFG"] if not self.TG else None,
-                memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
-                dtype=ttnn.bfloat8_b if self.TG else None,
-                compute_kernel_config=self.li_o_decode_compute_kernel_cfg,
-            )
+            if use_optimized_matmul():
+                print(f"[O projection] Using optimized matmul {attn_output.shape=}, {self.wo.shape=}")
+                print(f"[O projection] {ttnn.get_memory_config(attn_output)=}")
+                print(f"[O projection] {ttnn.get_memory_config(self.wo)=}")
+                dense_out_sharded = ttnn.experimental.optimized_matmul(attn_output, self.wo)
+                print(
+                    f"[O projection] Optimized matmul output {dense_out_sharded.shape=}, "
+                    f"{ttnn.get_memory_config(dense_out_sharded)=}"
+                )
+            else:
+                dense_out_sharded = ttnn.matmul(
+                    attn_output,
+                    self.wo,
+                    core_grid=ttnn.CoreGrid(y=4, x=8) if self.TG else None,
+                    program_config=self.model_config["ATTN_OUTPUT_PROGCFG"] if not self.TG else None,
+                    memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
+                    dtype=ttnn.bfloat8_b if self.TG else None,
+                    compute_kernel_config=self.li_o_decode_compute_kernel_cfg,
+                )
 
             ttnn.deallocate(attn_output_cat)
 
@@ -680,14 +706,21 @@ class Attention(LightweightModule):
                 raise ValueError(f"seq_len {seq_len} must be divisible by {self.MAX_QKV_MM_SEQ_LEN}")
             x_11SH = ttnn.reshape(x_11SH, [1, seq_len // self.MAX_QKV_MM_SEQ_LEN, self.MAX_QKV_MM_SEQ_LEN, -1])
 
-        xqkv_fused = ttnn.linear(
-            x_11SH,
-            self.wqkv,
-            dtype=self.ccl_dtype if self.TG else self.activation_dtype or ttnn.bfloat16,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            compute_kernel_config=self.li_qkv_prefill_compute_kernel_cfg,
-            program_config=self.model_config["XQKV_PREFILL_PROGCFG"](seq_len),
-        )
+        if use_optimized_matmul():
+            # print(f"[QKV projection] Using optimized matmul {x_11SH.shape=}, {self.wqkv.shape=}")
+            # print(f"[QKV projection] {ttnn.get_memory_config(x_11SH)=}")
+            # print(f"[QKV projection] {ttnn.get_memory_config(self.wqkv)=}")
+            xqkv_fused = ttnn.experimental.optimized_matmul(x_11SH, self.wqkv)
+            # print(f"[QKV projection] Optimized matmul output {xqkv_fused.shape=}, {ttnn.get_memory_config(xqkv_fused)=}")
+        else:
+            xqkv_fused = ttnn.linear(
+                x_11SH,
+                self.wqkv,
+                dtype=self.ccl_dtype if self.TG else self.activation_dtype or ttnn.bfloat16,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                compute_kernel_config=self.li_qkv_prefill_compute_kernel_cfg,
+                program_config=self.model_config["XQKV_PREFILL_PROGCFG"](seq_len),
+            )
 
         # FIXME: surely ttnn.linear bias should work?
         if self.wqkv_bias_prefill is not None:
@@ -872,14 +905,22 @@ class Attention(LightweightModule):
                 num_buffers_per_channel=2,
             )
 
-        output_11SH = ttnn.linear(
-            attn_output_11SH,
-            self.wo,
-            compute_kernel_config=self.li_o_prefill_compute_kernel_cfg,
-            dtype=self.activation_dtype or ttnn.bfloat8_b,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            program_config=self.model_config["WO_PREFILL_PROGCFG"](seq_len),
-        )
+
+        if use_optimized_matmul():
+            # print(f"[O projection] Using optimized matmul {attn_output_11SH.shape=}, {self.wo.shape=}")
+            # print(f"[O projection] {ttnn.get_memory_config(attn_output_11SH)=}")
+            # print(f"[O projection] {ttnn.get_memory_config(self.wo)=}")
+            output_11SH = ttnn.experimental.optimized_matmul(attn_output_11SH, self.wo)
+            # print(f"[O projection] Optimized matmul output {output_11SH.shape=}, {ttnn.get_memory_config(output_11SH)=}")
+        else:
+            output_11SH = ttnn.linear(
+                attn_output_11SH,
+                self.wo,
+                compute_kernel_config=self.li_o_prefill_compute_kernel_cfg,
+                dtype=self.activation_dtype or ttnn.bfloat8_b,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                program_config=self.model_config["WO_PREFILL_PROGCFG"](seq_len),
+            )
 
         if seq_len > 1024:
             output_11SH = ttnn.reshape(output_11SH, [1, 1, seq_len, -1])

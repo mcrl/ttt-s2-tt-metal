@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <cstdint>
 #include <map>
 #include <string>
 
@@ -16,55 +15,14 @@
 
 namespace ttnn::operations::experimental::matmul::optimized_matmul {
 
-enum class OptimizedMatmulVariantId : uint32_t {
-    StandardInterleaved = 0,
-    OptimizedABWriteHardcoded = 1,
-    OptimizedABWriteGenerated = 2,
-};
-
 struct OptimizedMatmulVariantSpec {
     bool optimized_a_read;
     bool optimized_b_read;
     bool optimized_write;
     bool packer_l1_acc;
     bool optimized_write_use_generated_schedule;
-};
-
-struct OptimizedMatmulPolicy {
-    OptimizedMatmulVariantId variant_id;
     tt::tt_metal::CoreCoord active_grid;
 };
-
-inline OptimizedMatmulVariantSpec get_optimized_matmul_variant_spec(const OptimizedMatmulVariantId variant_id) {
-    switch (variant_id) {
-        case OptimizedMatmulVariantId::StandardInterleaved:
-            return {
-                .optimized_a_read = false,
-                .optimized_b_read = false,
-                .optimized_write = false,
-                .packer_l1_acc = true,
-                .optimized_write_use_generated_schedule = false,
-            };
-        case OptimizedMatmulVariantId::OptimizedABWriteHardcoded:
-            return {
-                .optimized_a_read = true,
-                .optimized_b_read = true,
-                .optimized_write = true,
-                .packer_l1_acc = true,
-                .optimized_write_use_generated_schedule = false,
-            };
-        case OptimizedMatmulVariantId::OptimizedABWriteGenerated:
-            return {
-                .optimized_a_read = true,
-                .optimized_b_read = true,
-                .optimized_write = true,
-                .packer_l1_acc = true,
-                .optimized_write_use_generated_schedule = true,
-            };
-    }
-
-    TT_THROW("Unsupported optimized_matmul variant id {}", static_cast<uint32_t>(variant_id));
-}
 
 inline std::map<std::string, std::string> get_optimized_matmul_kernel_defines(
     const OptimizedMatmulVariantSpec& variant_spec) {
@@ -81,7 +39,8 @@ inline std::map<std::string, std::string> get_optimized_matmul_kernel_defines(
     };
 }
 
-inline OptimizedMatmulPolicy resolve_optimized_matmul_policy(const Tensor& input_tensor_a, const Tensor& input_tensor_b) {
+inline OptimizedMatmulVariantSpec resolve_optimized_matmul_variant_spec(
+    const Tensor& input_tensor_a, const Tensor& input_tensor_b) {
     const auto& a_shape = input_tensor_a.padded_shape();
     const auto& b_shape = input_tensor_b.padded_shape();
     const auto mt = a_shape[-2] / tt::constants::TILE_HEIGHT;
@@ -92,13 +51,31 @@ inline OptimizedMatmulPolicy resolve_optimized_matmul_policy(const Tensor& input
     (void)nt;
     (void)kt;
 
-    // Phase 1 defaults to the fully optimized WH8x8 path.
-    // Callers are expected to provide tensors whose underlying device buffers
-    // already obey the optim raw A/B layout contract.
-    return {
-        .variant_id = OptimizedMatmulVariantId::OptimizedABWriteHardcoded,
+    const auto all_optim_on = OptimizedMatmulVariantSpec{
+        .optimized_a_read = true,
+        .optimized_b_read = true,
+        .optimized_write = true,
+        .packer_l1_acc = true,
+        .optimized_write_use_generated_schedule = false,
         .active_grid = tt::tt_metal::CoreCoord{8, 8},
     };
+
+    // When both Mt and Nt are 1, prefer the Mt==1 rule.
+    if (mt == 1) {
+        auto spec = all_optim_on;
+        spec.optimized_write_use_generated_schedule = true;
+        spec.active_grid = tt::tt_metal::CoreCoord{8, 1};
+        return spec;
+    }
+
+    if (nt == 1) {
+        auto spec = all_optim_on;
+        spec.optimized_write_use_generated_schedule = true;
+        spec.active_grid = tt::tt_metal::CoreCoord{1, 8};
+        return spec;
+    }
+
+    return all_optim_on;
 }
 
 }  // namespace ttnn::operations::experimental::matmul::optimized_matmul

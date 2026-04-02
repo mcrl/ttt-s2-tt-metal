@@ -8,36 +8,29 @@
 #include <tt-metalium/distributed.hpp>
 
 #include "optimized_matmul_config.hpp"
+#include "ttnn/operations/core/compute_kernel/compute_kernel_config.hpp"
 #include "ttnn/tensor/tensor_utils.hpp"
 
 namespace ttnn::operations::experimental::matmul::optimized_matmul {
 
 namespace {
 
+OptimizedMatmulVariantSpec get_device_operation_variant_spec_from_attributes(
+    const OptimizedMatmulDeviceOperation::operation_attributes_t& operation_attributes) {
+    return {
+        .optimized_a_read = operation_attributes.optimized_a_read,
+        .optimized_b_read = operation_attributes.optimized_b_read,
+        .optimized_write = operation_attributes.optimized_write,
+        .packer_l1_acc = operation_attributes.packer_l1_acc,
+        .optimized_write_use_generated_schedule = operation_attributes.optimized_write_use_generated_schedule,
+        .active_grid = tt::tt_metal::CoreCoord{operation_attributes.active_grid_x, operation_attributes.active_grid_y},
+    };
+}
+
 ttnn::Shape compute_output_shape(const ttnn::Shape& input_shape_a, const ttnn::Shape& input_shape_b) {
     auto output_shape = input_shape_a;
     output_shape[-1] = input_shape_b[-1];
     return output_shape;
-}
-
-void validate_expected_buffer_layout(
-    const tt::tt_metal::Buffer* buffer,
-    const uint32_t expected_page_size,
-    const uint32_t expected_total_size,
-    const std::string_view tensor_name) {
-    TT_FATAL(buffer != nullptr, "optimized_matmul requires {} buffer to exist", tensor_name);
-    TT_FATAL(
-        buffer->page_size() == expected_page_size,
-        "optimized_matmul requires {} buffer page_size={} for optim layout, got {}",
-        tensor_name,
-        expected_page_size,
-        buffer->page_size());
-    TT_FATAL(
-        buffer->size() == expected_total_size,
-        "optimized_matmul requires {} buffer size={} for optim layout, got {}",
-        tensor_name,
-        expected_total_size,
-        buffer->size());
 }
 
 Tensor create_raw_optim_output_tensor(
@@ -64,6 +57,31 @@ Tensor create_raw_optim_output_tensor(
     tt::tt_metal::DeviceStorage device_storage(std::move(mesh_buffer), coords);
     auto tensor_topology = tt::tt_metal::TensorTopology::create_fully_replicated_tensor_topology(mesh_device->shape());
     return Tensor(std::move(device_storage), tensor_spec, std::move(tensor_topology));
+}
+
+MathFidelity resolve_optimized_matmul_math_fidelity(
+    const Tensor& input_tensor_a, std::optional<const DeviceComputeKernelConfig> compute_kernel_config) {
+    std::optional<DeviceComputeKernelConfig> resolved_compute_kernel_config = std::nullopt;
+    if (compute_kernel_config.has_value()) {
+        if (input_tensor_a.storage_type() == StorageType::DEVICE && input_tensor_a.device() != nullptr) {
+            resolved_compute_kernel_config =
+                init_device_compute_kernel_config(input_tensor_a.device()->arch(), compute_kernel_config, MathFidelity::HiFi2);
+        } else {
+            resolved_compute_kernel_config = compute_kernel_config.value();
+        }
+    }
+
+    auto math_fidelity = get_math_fidelity(resolved_compute_kernel_config);
+    if (math_fidelity == MathFidelity::Invalid) {
+        math_fidelity = MathFidelity::HiFi2;
+    }
+
+    TT_FATAL(
+        math_fidelity == MathFidelity::LoFi || math_fidelity == MathFidelity::HiFi2 ||
+            math_fidelity == MathFidelity::HiFi4,
+        "optimized_matmul currently supports only LoFi, HiFi2, or HiFi4 math_fidelity, got {}",
+        math_fidelity);
+    return math_fidelity;
 }
 
 void validate_inputs(const OptimizedMatmulDeviceOperation::tensor_args_t& tensor_args) {
@@ -93,8 +111,8 @@ void validate_inputs(const OptimizedMatmulDeviceOperation::tensor_args_t& tensor
     TT_FATAL(!input_tensor_a.is_sharded() && !input_tensor_b.is_sharded(), "optimized_matmul does not support sharded inputs");
     TT_FATAL(input_tensor_a.dtype() == input_tensor_b.dtype(), "optimized_matmul requires matching input dtypes");
     TT_FATAL(
-        input_tensor_a.dtype() == DataType::BFLOAT16,
-        "optimized_matmul currently supports only BFLOAT16 inputs, got {}",
+        input_tensor_a.dtype() == DataType::BFLOAT16 || input_tensor_a.dtype() == DataType::BFLOAT8_B,
+        "optimized_matmul currently supports only BFLOAT16 or BFLOAT8_B inputs, got {}",
         input_tensor_a.dtype());
     TT_FATAL(
         input_tensor_a.device()->arch() == tt::ARCH::WORMHOLE_B0,
@@ -114,11 +132,6 @@ void validate_inputs(const OptimizedMatmulDeviceOperation::tensor_args_t& tensor
     TT_FATAL(
         a_logical_shape.rank() >= 2 && b_logical_shape.rank() >= 2,
         "optimized_matmul requires both inputs to be at least rank 2");
-    TT_FATAL(
-        a_logical_shape.rank() == b_logical_shape.rank(),
-        "optimized_matmul currently supports only inputs with matching ranks, got {} and {}",
-        a_logical_shape.rank(),
-        b_logical_shape.rank());
     TT_FATAL(
         a_logical_shape[-1] == b_logical_shape[-2],
         "optimized_matmul requires A.K == B.K, got {} and {}",
@@ -141,22 +154,6 @@ void validate_inputs(const OptimizedMatmulDeviceOperation::tensor_args_t& tensor
         "optimized_matmul currently supports only batch_product == 1, got {} and {}",
         batch_size_a,
         batch_size_b);
-
-    const auto policy = resolve_optimized_matmul_policy(input_tensor_a, input_tensor_b);
-    const auto variant_spec = get_optimized_matmul_variant_spec(policy.variant_id);
-    const auto resolved_config = resolve_optimized_matmul_config(input_tensor_a, input_tensor_b, policy.active_grid);
-    const auto buffer_layout = resolve_optimized_matmul_buffer_layout(
-        resolved_config,
-        variant_spec,
-        tt::tile_size(datatype_to_dataformat_converter(input_tensor_a.dtype())),
-        input_tensor_a.device()->num_dram_channels());
-
-    if (variant_spec.optimized_a_read) {
-        validate_expected_buffer_layout(input_tensor_a.buffer(), buffer_layout.a_page_size, buffer_layout.a_total_size, "A");
-    }
-    if (variant_spec.optimized_b_read) {
-        validate_expected_buffer_layout(input_tensor_b.buffer(), buffer_layout.b_page_size, buffer_layout.b_total_size, "B");
-    }
 }
 
 }  // namespace
@@ -173,11 +170,30 @@ void OptimizedMatmulDeviceOperation::validate_on_program_cache_miss(
         "optimized_matmul currently supports only DRAM interleaved output; got {}",
         operation_attributes.output_memory_config);
     TT_FATAL(
-        operation_attributes.active_grid_x == 8 && operation_attributes.active_grid_y == 8,
-        "optimized_matmul currently supports only an 8x8 active grid, got {}x{}",
+        operation_attributes.math_fidelity == MathFidelity::LoFi ||
+            operation_attributes.math_fidelity == MathFidelity::HiFi2 ||
+            operation_attributes.math_fidelity == MathFidelity::HiFi4,
+        "optimized_matmul currently supports only LoFi, HiFi2, or HiFi4 math_fidelity, got {}",
+        operation_attributes.math_fidelity);
+    TT_FATAL(
+        operation_attributes.active_grid_x > 0 && operation_attributes.active_grid_x <= 8 &&
+            operation_attributes.active_grid_y > 0 && operation_attributes.active_grid_y <= 8,
+        "optimized_matmul currently supports only active grids within 8x8, got {}x{}",
         operation_attributes.active_grid_x,
         operation_attributes.active_grid_y);
     validate_inputs(tensor_args);
+    const auto resolved_variant_spec =
+        resolve_optimized_matmul_variant_spec(tensor_args.input_tensor_a, tensor_args.input_tensor_b);
+    TT_FATAL(
+        operation_attributes.optimized_a_read == resolved_variant_spec.optimized_a_read &&
+            operation_attributes.optimized_b_read == resolved_variant_spec.optimized_b_read &&
+            operation_attributes.optimized_write == resolved_variant_spec.optimized_write &&
+            operation_attributes.packer_l1_acc == resolved_variant_spec.packer_l1_acc &&
+            operation_attributes.optimized_write_use_generated_schedule ==
+                resolved_variant_spec.optimized_write_use_generated_schedule &&
+            operation_attributes.active_grid_x == resolved_variant_spec.active_grid.x &&
+            operation_attributes.active_grid_y == resolved_variant_spec.active_grid.y,
+        "optimized_matmul operation attributes do not match the resolved variant spec");
 }
 
 void OptimizedMatmulDeviceOperation::validate_on_program_cache_hit(
@@ -205,8 +221,7 @@ OptimizedMatmulDeviceOperation::spec_return_value_t OptimizedMatmulDeviceOperati
 OptimizedMatmulDeviceOperation::tensor_return_value_t OptimizedMatmulDeviceOperation::create_output_tensors(
     const operation_attributes_t& operation_attributes, const tensor_args_t& tensor_args) {
     const auto output_spec = compute_output_specs(operation_attributes, tensor_args);
-    const auto variant_spec =
-        get_optimized_matmul_variant_spec(static_cast<OptimizedMatmulVariantId>(operation_attributes.variant_id));
+    const auto variant_spec = get_device_operation_variant_spec_from_attributes(operation_attributes);
     if (!variant_spec.optimized_write) {
         return create_device_tensor(output_spec, tensor_args.input_tensor_a.device());
     }
@@ -225,14 +240,23 @@ OptimizedMatmulDeviceOperation::tensor_return_value_t OptimizedMatmulDeviceOpera
 }
 
 std::tuple<OptimizedMatmulDeviceOperation::operation_attributes_t, OptimizedMatmulDeviceOperation::tensor_args_t>
-OptimizedMatmulDeviceOperation::invoke(const Tensor& input_tensor_a, const Tensor& input_tensor_b) {
-    const auto policy = resolve_optimized_matmul_policy(input_tensor_a, input_tensor_b);
+OptimizedMatmulDeviceOperation::invoke(
+    const Tensor& input_tensor_a,
+    const Tensor& input_tensor_b,
+    std::optional<const DeviceComputeKernelConfig> compute_kernel_config) {
+    const auto variant_spec = resolve_optimized_matmul_variant_spec(input_tensor_a, input_tensor_b);
+    const auto math_fidelity = resolve_optimized_matmul_math_fidelity(input_tensor_a, compute_kernel_config);
     return {
         operation_attributes_t{
             ttnn::DRAM_MEMORY_CONFIG,
-            static_cast<uint32_t>(policy.variant_id),
-            policy.active_grid.x,
-            policy.active_grid.y},
+            math_fidelity,
+            variant_spec.optimized_a_read,
+            variant_spec.optimized_b_read,
+            variant_spec.optimized_write,
+            variant_spec.packer_l1_acc,
+            variant_spec.optimized_write_use_generated_schedule,
+            variant_spec.active_grid.x,
+            variant_spec.active_grid.y},
         tensor_args_t{input_tensor_a, input_tensor_b}};
 }
 

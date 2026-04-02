@@ -9,7 +9,7 @@ from models.common.lightweightmodule import LightweightModule
 from models.tt_transformers.tt.ccl import tt_all_reduce
 from models.tt_transformers.tt.common import pad_to_size
 from models.tt_transformers.tt.model_config import OpGroup, TensorGroup
-
+from models.tt_transformers.tt.common import use_optimized_matmul
 
 class MLP(LightweightModule):
     def __init__(
@@ -56,7 +56,8 @@ class MLP(LightweightModule):
             mesh_mapper=ttnn.ShardTensor2dMesh(self.mesh_device, dims=dims, mesh_shape=args.cluster_shape),
             layout=ttnn.TILE_LAYOUT,
             memory_config=(
-                ttnn.DRAM_MEMORY_CONFIG if args.is_galaxy else w2_mem_config if "w2" in name else w1_w3_mem_config
+                # ttnn.DRAM_MEMORY_CONFIG if args.is_galaxy else w2_mem_config if "w2" in name else w1_w3_mem_config
+                ttnn.DRAM_MEMORY_CONFIG # TTT(jinpyo) - always place weight tensor to DRAM - interleaved
             ),
             cache_file_name=cache_name(name),
         )
@@ -122,25 +123,36 @@ class MLP(LightweightModule):
         # In decode mode (seqlen <= 32) do DRAM sharded matmuls
         # These use HiFi2; this drops 1 bit of the activations but would be FLOP-bound on 12 cores with HiFi4
         memory_config = ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG
-        w1_out = ttnn.linear(
-            x,
-            self.w1,
-            dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
-            core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_1 else None,
-            compute_kernel_config=li_ff1_3_compute_kernel_cfg,
-            program_config=pc_1,
-            memory_config=memory_config,
-        )
 
-        w3_out = ttnn.linear(
-            x,
-            self.w3,
-            dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
-            core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_3 else None,
-            compute_kernel_config=li_ff1_3_compute_kernel_cfg,
-            program_config=pc_3,
-            memory_config=memory_config,
-        )
+        if use_optimized_matmul(): # TTT
+            # print(f"[FFN GEMM 1] Using optimized matmul {x.shape=}, {self.w1.shape=} {self.w3.shape=}")
+            # print(f"[FFN GEMM 1] {ttnn.get_memory_config(x)=}")
+            # print(f"[FFN GEMM 1] {ttnn.get_memory_config(self.w1)=}")
+            # print(f"[FFN GEMM 1] {ttnn.get_memory_config(self.w3)=}")
+            w1_out = ttnn.experimental.optimized_matmul(x, self.w1)
+            w3_out = ttnn.experimental.optimized_matmul(x, self.w3)
+            # print(f"[FFN GEMM 1] Optimized matmul output {w1_out.shape=}, {ttnn.get_memory_config(w1_out)=}")
+            # print(f"[FFN GEMM 1] Optimized matmul output {w3_out.shape=}, {ttnn.get_memory_config(w3_out)=}")
+        else:
+            w1_out = ttnn.linear(
+                x,
+                self.w1,
+                dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
+                core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_1 else None,
+                compute_kernel_config=li_ff1_3_compute_kernel_cfg,
+                program_config=pc_1,
+                memory_config=memory_config,
+            )
+
+            w3_out = ttnn.linear(
+                x,
+                self.w3,
+                dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
+                core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_3 else None,
+                compute_kernel_config=li_ff1_3_compute_kernel_cfg,
+                program_config=pc_3,
+                memory_config=memory_config,
+            )
         ttnn.deallocate(x)
 
         if TG:
@@ -242,15 +254,24 @@ class MLP(LightweightModule):
         li_ff2_compute_kernel_cfg = self.model_config["DECODERS_OPTIMIZATIONS"].get_math_fidelity(
             decoder_id=layer_num, op=OpGroup.LI_FF2, configuration=self.args
         )
-        w2_out = ttnn.linear(
-            w2_in,
-            self.w2,
-            compute_kernel_config=li_ff2_compute_kernel_cfg,
-            dtype=self.args.ccl_dtype if TG else activation_dtype or ttnn.bfloat16,
-            program_config=pc_2,
-            memory_config=memory_config,
-            core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_2 else None,
-        )
+
+
+        if use_optimized_matmul(): # TTT
+            # print(f"[FFN GEMM 2] Using optimized matmul {w2_in.shape=}, {self.w2.shape=}")
+            # print(f"[FFN GEMM 1] {ttnn.get_memory_config(w2_in)=}")
+            # print(f"[FFN GEMM 1] {ttnn.get_memory_config(self.w2)=}")
+            w2_out = ttnn.experimental.optimized_matmul(w2_in, self.w2)
+            # print(f"[FFN GEMM 2] Optimized matmul output {w2_out.shape=}, {ttnn.get_memory_config(w2_out)=}")
+        else:
+            w2_out = ttnn.linear(
+                w2_in,
+                self.w2,
+                compute_kernel_config=li_ff2_compute_kernel_cfg,
+                dtype=self.args.ccl_dtype if TG else activation_dtype or ttnn.bfloat16,
+                program_config=pc_2,
+                memory_config=memory_config,
+                core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_2 else None,
+            )
         ttnn.deallocate(w2_in)
         # if mode == "decode" and not TG:
         #     w2_out = ttnn.sharded_to_interleaved(w2_out, ttnn.DRAM_MEMORY_CONFIG)

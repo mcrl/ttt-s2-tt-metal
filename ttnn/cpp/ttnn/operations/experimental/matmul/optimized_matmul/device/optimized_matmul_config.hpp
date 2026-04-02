@@ -11,8 +11,8 @@
 #include <tt-metalium/core_coord.hpp>
 #include <tt_stl/assert.hpp>
 
-#include "kernels/dataflow/schedules/wormhole_b0_8x8_schedule.hpp"
 #include "optimized_matmul_policy.hpp"
+#include "optimized_matmul_schedule.hpp"
 #include "ttnn/operations/matmul/device/matmul_op.hpp"
 #include "ttnn/tensor/tensor_utils.hpp"
 
@@ -118,6 +118,7 @@ inline OptimizedMatmulBufferLayout resolve_optimized_matmul_buffer_layout(
     const OptimizedMatmulVariantSpec& variant_spec,
     const uint32_t single_tile_size,
     const uint32_t dram_bank_count) {
+    const auto schedule_metadata = get_optimized_matmul_schedule_metadata(variant_spec.active_grid);
     const uint32_t logical_a_size = single_tile_size * config.Mt * config.Kt;
     const uint32_t logical_b_size = single_tile_size * config.Kt * config.Nt;
     const uint32_t logical_c_size = single_tile_size * config.Mt * config.Nt;
@@ -152,21 +153,22 @@ inline OptimizedMatmulBufferLayout resolve_optimized_matmul_buffer_layout(
         variant_spec.optimized_a_read,
         logical_a_size,
         repetitions_a,
-        A_READ_valid_slots_per_bank_count,
-        split_balanced_items(a_tiles_per_block, A_READ_CHUNKS_PER_CORE, 0) * single_tile_size);
+        schedule_metadata.a_read_valid_slots_per_bank_count,
+        split_balanced_items(a_tiles_per_block, schedule_metadata.a_read_chunks_per_core, 0) * single_tile_size);
 
     const auto [b_page_size, b_total_size] = set_slot_layout(
         variant_spec.optimized_b_read,
         logical_b_size,
         repetitions_b,
-        B_READ_valid_slots_per_bank_count,
-        split_balanced_items(b_tiles_per_block, B_READ_CHUNKS_PER_CORE, 0) * single_tile_size);
+        schedule_metadata.b_read_valid_slots_per_bank_count,
+        split_balanced_items(b_tiles_per_block, schedule_metadata.b_read_chunks_per_core, 0) * single_tile_size);
 
-    const uint32_t c_chunks =
-        variant_spec.optimized_write_use_generated_schedule ? C_WRITE_CHUNKS_PER_CORE : NUM_PHASE;
+    const uint32_t c_chunks = variant_spec.optimized_write_use_generated_schedule
+                                  ? schedule_metadata.c_write_chunks_per_core
+                                  : schedule_metadata.c_write_hardcoded_num_phase;
     const uint32_t c_valid_slots_per_bank_count = variant_spec.optimized_write_use_generated_schedule
-                                                      ? C_WRITE_valid_slots_per_bank_count
-                                                      : C_WRITE_HARDCODED_valid_slots_per_bank_count;
+                                                      ? schedule_metadata.c_write_valid_slots_per_bank_count
+                                                      : schedule_metadata.c_write_hardcoded_valid_slots_per_bank_count;
     const auto [c_page_size, c_total_size] = set_slot_layout(
         variant_spec.optimized_write,
         logical_c_size,

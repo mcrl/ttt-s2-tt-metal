@@ -9,6 +9,7 @@
 
 #include "ttnn/decorators.hpp"
 #include "ttnn/device_operation.hpp"
+#include "ttnn/operations/core/compute_kernel/compute_kernel_config.hpp"
 #include "ttnn/tensor/tensor.hpp"
 #include "ttnn/types.hpp"
 
@@ -19,14 +20,36 @@ namespace ttnn::operations::experimental::matmul::optimized_matmul {
 struct OptimizedMatmulDeviceOperation {
     struct operation_attributes_t {
         MemoryConfig output_memory_config;
-        uint32_t variant_id;
+        MathFidelity math_fidelity;
+        bool optimized_a_read;
+        bool optimized_b_read;
+        bool optimized_write;
+        bool packer_l1_acc;
+        bool optimized_write_use_generated_schedule;
         uint32_t active_grid_x;
         uint32_t active_grid_y;
 
-        static constexpr auto attribute_names =
-            std::forward_as_tuple("output_memory_config", "variant_id", "active_grid_x", "active_grid_y");
+        static constexpr auto attribute_names = std::forward_as_tuple(
+            "output_memory_config",
+            "math_fidelity",
+            "optimized_a_read",
+            "optimized_b_read",
+            "optimized_write",
+            "packer_l1_acc",
+            "optimized_write_use_generated_schedule",
+            "active_grid_x",
+            "active_grid_y");
         auto attribute_values() const {
-            return std::forward_as_tuple(output_memory_config, variant_id, active_grid_x, active_grid_y);
+            return std::forward_as_tuple(
+                output_memory_config,
+                math_fidelity,
+                optimized_a_read,
+                optimized_b_read,
+                optimized_write,
+                packer_l1_acc,
+                optimized_write_use_generated_schedule,
+                active_grid_x,
+                active_grid_y);
         }
     };
 
@@ -68,7 +91,9 @@ struct OptimizedMatmulDeviceOperation {
     static spec_return_value_t compute_output_specs(const operation_attributes_t&, const tensor_args_t&);
     static tensor_return_value_t create_output_tensors(const operation_attributes_t&, const tensor_args_t&);
     static std::tuple<operation_attributes_t, tensor_args_t> invoke(
-        const Tensor& input_tensor_a, const Tensor& input_tensor_b);
+        const Tensor& input_tensor_a,
+        const Tensor& input_tensor_b,
+        std::optional<const DeviceComputeKernelConfig> compute_kernel_config = std::nullopt);
 };
 
 }  // namespace ttnn::operations::experimental::matmul::optimized_matmul

@@ -30,13 +30,19 @@ void bind_optimized_matmul(py::module& module) {
             - input_tensor_b must use ttnn.DRAM_MEMORY_CONFIG
             - output is always produced with ttnn.DRAM_MEMORY_CONFIG
             - both inputs must be device TILE tensors
+            - compute_kernel_config is optional and currently only math_fidelity is consumed
+            - supported math_fidelity values are LoFi, HiFi2, and HiFi4
         )doc",
         ttnn::pybind_overload_t{
-            [](const OperationType& self, const Tensor& input_tensor_a, const Tensor& input_tensor_b) {
-                return self(input_tensor_a, input_tensor_b);
+            [](const OperationType& self,
+               const Tensor& input_tensor_a,
+               const Tensor& input_tensor_b,
+               const std::optional<const DeviceComputeKernelConfig> compute_kernel_config) {
+                return self(input_tensor_a, input_tensor_b, compute_kernel_config);
             },
             py::arg("input_tensor_a").noconvert(),
-            py::arg("input_tensor_b").noconvert()});
+            py::arg("input_tensor_b").noconvert(),
+            py::arg("compute_kernel_config").noconvert() = std::nullopt});
 }
 
 }  // namespace ttnn::operations::experimental::matmul::detail

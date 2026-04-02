@@ -879,16 +879,19 @@ class ModelArgs:
                 128256 // 8 if is_blackhole() else 668 * self.lm_head_core_grid.num_cores
             )
 
-            self.model_config["LM_HEAD_INPUT_MEMCFG"] = ttnn.create_sharded_memory_config(
-                (
-                    self.tile_padded_batch_rows,
-                    nearest_32((self.dim // (4 if self.is_galaxy else 1)) // self.lm_head_core_grid.num_cores),
-                ),  # Shard shape: [32, 128] -> 1 shard per core
-                self.lm_head_core_grid,
-                ttnn.ShardStrategy.WIDTH,
-                ttnn.ShardOrientation.ROW_MAJOR,
-                use_height_and_width_as_shard_shape=True,
-            )
+            # self.model_config["LM_HEAD_INPUT_MEMCFG"] = ttnn.create_sharded_memory_config(
+            #     (
+            #         self.tile_padded_batch_rows,
+            #         nearest_32((self.dim // (4 if self.is_galaxy else 1)) // self.lm_head_core_grid.num_cores),
+            #     ),  # Shard shape: [32, 128] -> 1 shard per core
+            #     self.lm_head_core_grid,
+            #     ttnn.ShardStrategy.WIDTH,
+            #     ttnn.ShardOrientation.ROW_MAJOR,
+            #     use_height_and_width_as_shard_shape=True,
+            # )
+            
+            self.model_config["LM_HEAD_INPUT_MEMCFG"] = ttnn.DRAM_MEMORY_CONFIG # TTT(jinpyo) - DRAM fix
+
             self.qkv_size = self.head_dim * (2 * self.n_kv_heads + self.n_heads)
             self.min_kv_prefill_shard_seqlen = (self.tile_size * 8 * 8) / (self.n_kv_heads // self.cluster_shape[1])
             self.model_config["XQKV_PREFILL_PROGCFG"] = lambda seq_len: ttnn.MatmulMultiCoreReuseMultiCastProgramConfig(
