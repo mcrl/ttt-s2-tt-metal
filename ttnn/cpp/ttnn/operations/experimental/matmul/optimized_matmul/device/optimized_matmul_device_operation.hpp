@@ -21,6 +21,7 @@ struct OptimizedMatmulDeviceOperation {
     struct operation_attributes_t {
         MemoryConfig output_memory_config;
         MathFidelity math_fidelity;
+        bool input_a_is_dram;
         bool optimized_a_read;
         bool optimized_b_read;
         bool optimized_write;
@@ -32,6 +33,7 @@ struct OptimizedMatmulDeviceOperation {
         static constexpr auto attribute_names = std::forward_as_tuple(
             "output_memory_config",
             "math_fidelity",
+            "input_a_is_dram",
             "optimized_a_read",
             "optimized_b_read",
             "optimized_write",
@@ -43,6 +45,7 @@ struct OptimizedMatmulDeviceOperation {
             return std::forward_as_tuple(
                 output_memory_config,
                 math_fidelity,
+                input_a_is_dram,
                 optimized_a_read,
                 optimized_b_read,
                 optimized_write,

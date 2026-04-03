@@ -182,13 +182,14 @@ FORCE_INLINE uint32_t get_valid_subblock_extent(const uint32_t block_offset,
 }
 
 // A_read: Only called when OPTIMIZED_A_READ=false
-// (standard interleaved, per-tile DRAM transaction)
+// (standard interleaved, per-tile transaction from DRAM or L1)
 FORCE_INLINE void A_read(uint32_t row_bidx, uint32_t k_bidx,
                          uint32_t A_l1_ptr, uint8_t noc) {
     if (!is_A_reader()) return;
+    constexpr bool input_a_is_dram = get_compile_time_arg_val(8) == 1;
     const uint32_t valid_block_h = get_valid_block_h(row_bidx);
-    InterleavedAddrGen<true> addrgen = {.bank_base_address = A_DRAM_base_addr,
-                                        .page_size = A_tile_bytes};
+    InterleavedAddrGen<input_a_is_dram> addrgen = {.bank_base_address = A_DRAM_base_addr,
+                                                   .page_size = A_tile_bytes};
     for (uint32_t t = 0; t < A_tiles_per_block; t++) {
         uint32_t h = t / BKt;
         uint32_t ki = t % BKt;
@@ -562,7 +563,7 @@ void parse_args() {
 
     // Compile-time arguments
     // [Amaster_sem, Aslave_sem, Bmaster_sem, Bslave_sem,
-    //  global_master_sem, global_slave_sem, active_PW, active_PH]
+    //  global_master_sem, global_slave_sem, active_PW, active_PH, input_a_is_dram]
     Amaster_sem = get_compile_time_arg_val(0);
     Aslave_sem = get_compile_time_arg_val(1);
     Bmaster_sem = get_compile_time_arg_val(2);

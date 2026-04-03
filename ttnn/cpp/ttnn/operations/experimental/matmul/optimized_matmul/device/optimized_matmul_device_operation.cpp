@@ -18,6 +18,7 @@ namespace {
 OptimizedMatmulVariantSpec get_device_operation_variant_spec_from_attributes(
     const OptimizedMatmulDeviceOperation::operation_attributes_t& operation_attributes) {
     return {
+        .input_a_is_dram = operation_attributes.input_a_is_dram,
         .optimized_a_read = operation_attributes.optimized_a_read,
         .optimized_b_read = operation_attributes.optimized_b_read,
         .optimized_write = operation_attributes.optimized_write,
@@ -84,11 +85,16 @@ MathFidelity resolve_optimized_matmul_math_fidelity(
     return math_fidelity;
 }
 
-void validate_inputs(const OptimizedMatmulDeviceOperation::tensor_args_t& tensor_args) {
+void validate_inputs(
+    const OptimizedMatmulDeviceOperation::operation_attributes_t& operation_attributes,
+    const OptimizedMatmulDeviceOperation::tensor_args_t& tensor_args) {
     using namespace tt::constants;
 
     const auto& input_tensor_a = tensor_args.input_tensor_a;
     const auto& input_tensor_b = tensor_args.input_tensor_b;
+    const bool input_a_is_interleaved_dram = is_interleaved_buffer_type(input_tensor_a, BufferType::DRAM);
+    const bool input_a_is_interleaved_l1 = is_interleaved_buffer_type(input_tensor_a, BufferType::L1);
+    const bool input_b_is_interleaved_dram = is_interleaved_buffer_type(input_tensor_b, BufferType::DRAM);
 
     TT_FATAL(
         input_tensor_a.storage_type() == StorageType::DEVICE && input_tensor_b.storage_type() == StorageType::DEVICE,
@@ -101,11 +107,12 @@ void validate_inputs(const OptimizedMatmulDeviceOperation::tensor_args_t& tensor
         input_tensor_a.layout() == Layout::TILE && input_tensor_b.layout() == Layout::TILE,
         "optimized_matmul currently supports only TILE layout inputs");
     TT_FATAL(
-        input_tensor_a.memory_config() == ttnn::DRAM_MEMORY_CONFIG,
-        "optimized_matmul currently supports only DRAM interleaved input A; got {}",
+        input_a_is_interleaved_dram || (input_a_is_interleaved_l1 && !operation_attributes.optimized_a_read),
+        "optimized_matmul currently supports input A only as DRAM interleaved, or as interleaved L1 when optimized "
+        "A read is disabled; got {}",
         input_tensor_a.memory_config());
     TT_FATAL(
-        input_tensor_b.memory_config() == ttnn::DRAM_MEMORY_CONFIG,
+        input_b_is_interleaved_dram,
         "optimized_matmul currently supports only DRAM interleaved input B; got {}",
         input_tensor_b.memory_config());
     TT_FATAL(!input_tensor_a.is_sharded() && !input_tensor_b.is_sharded(), "optimized_matmul does not support sharded inputs");
@@ -181,11 +188,12 @@ void OptimizedMatmulDeviceOperation::validate_on_program_cache_miss(
         "optimized_matmul currently supports only active grids within 8x8, got {}x{}",
         operation_attributes.active_grid_x,
         operation_attributes.active_grid_y);
-    validate_inputs(tensor_args);
+    validate_inputs(operation_attributes, tensor_args);
     const auto resolved_variant_spec =
         resolve_optimized_matmul_variant_spec(tensor_args.input_tensor_a, tensor_args.input_tensor_b);
     TT_FATAL(
-        operation_attributes.optimized_a_read == resolved_variant_spec.optimized_a_read &&
+        operation_attributes.input_a_is_dram == resolved_variant_spec.input_a_is_dram &&
+            operation_attributes.optimized_a_read == resolved_variant_spec.optimized_a_read &&
             operation_attributes.optimized_b_read == resolved_variant_spec.optimized_b_read &&
             operation_attributes.optimized_write == resolved_variant_spec.optimized_write &&
             operation_attributes.packer_l1_acc == resolved_variant_spec.packer_l1_acc &&
@@ -250,6 +258,7 @@ OptimizedMatmulDeviceOperation::invoke(
         operation_attributes_t{
             ttnn::DRAM_MEMORY_CONFIG,
             math_fidelity,
+            variant_spec.input_a_is_dram,
             variant_spec.optimized_a_read,
             variant_spec.optimized_b_read,
             variant_spec.optimized_write,
