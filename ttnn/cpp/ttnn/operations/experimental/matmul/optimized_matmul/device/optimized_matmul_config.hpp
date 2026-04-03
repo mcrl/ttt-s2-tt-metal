@@ -47,11 +47,14 @@ inline uint32_t ceil_div_u32(const uint32_t value, const uint32_t divisor) {
 }
 
 inline OptimizedMatmulConfig resolve_optimized_matmul_config(
-    const Tensor& input_tensor_a, const Tensor& input_tensor_b, const tt::tt_metal::CoreCoord& active_grid) {
+    const Tensor& input_tensor_a,
+    const Tensor& input_tensor_b,
+    const tt::tt_metal::DataType output_dtype,
+    const tt::tt_metal::CoreCoord& active_grid) {
     using namespace ttnn::operations::matmul;
 
     const auto program_config = resolve_matmul_2d_reuse_program_config(
-        input_tensor_a, input_tensor_b, std::nullopt, Matmul{}, std::nullopt);
+        input_tensor_a, input_tensor_b, std::nullopt, Matmul{.output_dtype = output_dtype}, std::nullopt);
 
     const auto& a_shape = input_tensor_a.padded_shape();
     const auto& b_shape = input_tensor_b.padded_shape();
@@ -116,12 +119,14 @@ inline uint32_t split_front_loaded_items(
 inline OptimizedMatmulBufferLayout resolve_optimized_matmul_buffer_layout(
     const OptimizedMatmulConfig& config,
     const OptimizedMatmulVariantSpec& variant_spec,
-    const uint32_t single_tile_size,
+    const uint32_t a_tile_size,
+    const uint32_t b_tile_size,
+    const uint32_t c_tile_size,
     const uint32_t dram_bank_count) {
     const auto schedule_metadata = get_optimized_matmul_schedule_metadata(variant_spec.active_grid);
-    const uint32_t logical_a_size = single_tile_size * config.Mt * config.Kt;
-    const uint32_t logical_b_size = single_tile_size * config.Kt * config.Nt;
-    const uint32_t logical_c_size = single_tile_size * config.Mt * config.Nt;
+    const uint32_t logical_a_size = a_tile_size * config.Mt * config.Kt;
+    const uint32_t logical_b_size = b_tile_size * config.Kt * config.Nt;
+    const uint32_t logical_c_size = c_tile_size * config.Mt * config.Nt;
     const uint32_t num_kblocks = config.Kt / config.BKt;
     const uint32_t repetitions_a = config.row_nblocks_per_core * num_kblocks;
     const uint32_t repetitions_b = config.col_nblocks_per_core * num_kblocks;
@@ -129,17 +134,18 @@ inline OptimizedMatmulBufferLayout resolve_optimized_matmul_buffer_layout(
     const uint32_t a_tiles_per_block = config.BMt * config.BKt;
     const uint32_t b_tiles_per_block = config.BKt * config.BNt;
     const uint32_t n_subblocks = (config.BMt / config.SBMt) * (config.BNt / config.SBNt);
-    const uint32_t subblock_bytes = single_tile_size * config.SBMt * config.SBNt;
+    const uint32_t subblock_bytes = c_tile_size * config.SBMt * config.SBNt;
 
-    auto set_slot_layout = [single_tile_size, dram_bank_count](
+    auto set_slot_layout = [dram_bank_count](
                                const bool enabled,
+                               const uint32_t page_size_if_disabled,
                                const uint32_t logical_size,
                                const uint32_t repetitions,
                                const uint32_t valid_slots_per_bank_count,
                                const uint32_t slot_bytes) {
         std::pair<uint32_t, uint32_t> result{};
         if (!enabled) {
-            result.first = single_tile_size;
+            result.first = page_size_if_disabled;
             result.second = logical_size;
             return result;
         }
@@ -151,17 +157,19 @@ inline OptimizedMatmulBufferLayout resolve_optimized_matmul_buffer_layout(
 
     const auto [a_page_size, a_total_size] = set_slot_layout(
         variant_spec.optimized_a_read,
+        a_tile_size,
         logical_a_size,
         repetitions_a,
         schedule_metadata.a_read_valid_slots_per_bank_count,
-        split_balanced_items(a_tiles_per_block, schedule_metadata.a_read_chunks_per_core, 0) * single_tile_size);
+        split_balanced_items(a_tiles_per_block, schedule_metadata.a_read_chunks_per_core, 0) * a_tile_size);
 
     const auto [b_page_size, b_total_size] = set_slot_layout(
         variant_spec.optimized_b_read,
+        b_tile_size,
         logical_b_size,
         repetitions_b,
         schedule_metadata.b_read_valid_slots_per_bank_count,
-        split_balanced_items(b_tiles_per_block, schedule_metadata.b_read_chunks_per_core, 0) * single_tile_size);
+        split_balanced_items(b_tiles_per_block, schedule_metadata.b_read_chunks_per_core, 0) * b_tile_size);
 
     const uint32_t c_chunks = variant_spec.optimized_write_use_generated_schedule
                                   ? schedule_metadata.c_write_chunks_per_core
@@ -171,6 +179,7 @@ inline OptimizedMatmulBufferLayout resolve_optimized_matmul_buffer_layout(
                                                       : schedule_metadata.c_write_hardcoded_valid_slots_per_bank_count;
     const auto [c_page_size, c_total_size] = set_slot_layout(
         variant_spec.optimized_write,
+        c_tile_size,
         logical_c_size,
         repetitions_c,
         c_valid_slots_per_bank_count,

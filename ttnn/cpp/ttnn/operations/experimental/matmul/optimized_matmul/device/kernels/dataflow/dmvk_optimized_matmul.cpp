@@ -207,13 +207,14 @@ FORCE_INLINE void A_read(uint32_t row_bidx, uint32_t k_bidx,
 }
 
 // B_read: Only called when OPTIMIZED_B_READ=false
-// (standard interleaved, per-tile DRAM transaction)
+// (standard interleaved, per-tile transaction from DRAM or L1)
 FORCE_INLINE void B_read(uint32_t col_bidx, uint32_t k_bidx,
                          uint32_t B_l1_ptr, uint8_t noc) {
     if (!is_B_reader()) return;
+    constexpr bool input_b_is_dram = get_compile_time_arg_val(9) == 1;
     const uint32_t valid_block_w = get_valid_block_w(col_bidx);
-    InterleavedAddrGen<true> addrgen = {.bank_base_address = B_DRAM_base_addr,
-                                        .page_size = B_tile_bytes};
+    InterleavedAddrGen<input_b_is_dram> addrgen = {.bank_base_address = B_DRAM_base_addr,
+                                                   .page_size = B_tile_bytes};
     for (uint32_t t = 0; t < B_tiles_per_block; t++) {
         uint32_t ki = t / BNt;
         uint32_t w = t % BNt;
@@ -333,10 +334,12 @@ FORCE_INLINE void B_read_optimized(uint32_t col_bidx, uint32_t k_bidx,
     }
 }
 
-// C_write: Only called when OPTIMIZED_WRITE=false (standard interleaved, single NOC writer)
+// C_write: Only called when OPTIMIZED_WRITE=false
+// (standard interleaved, single NOC writer to DRAM or L1)
 FORCE_INLINE void C_write(uint32_t row_bidx, uint32_t col_bidx, uint8_t noc) {
-    InterleavedAddrGen<true> addrgen = {.bank_base_address = C_DRAM_base_addr,
-                                        .page_size = C_tile_bytes};
+    constexpr bool output_is_dram = get_compile_time_arg_val(10) == 1;
+    InterleavedAddrGen<output_is_dram> addrgen = {.bank_base_address = C_DRAM_base_addr,
+                                                  .page_size = C_tile_bytes};
     // Real tile extent of this padded output block after clipping the bottom/right tail.
     const uint32_t block_h = get_valid_block_h(row_bidx);
     const uint32_t block_w = get_valid_block_w(col_bidx);
@@ -563,7 +566,8 @@ void parse_args() {
 
     // Compile-time arguments
     // [Amaster_sem, Aslave_sem, Bmaster_sem, Bslave_sem,
-    //  global_master_sem, global_slave_sem, active_PW, active_PH, input_a_is_dram]
+    //  global_master_sem, global_slave_sem, active_PW, active_PH,
+    //  input_a_is_dram, input_b_is_dram, output_is_dram]
     Amaster_sem = get_compile_time_arg_val(0);
     Aslave_sem = get_compile_time_arg_val(1);
     Bmaster_sem = get_compile_time_arg_val(2);

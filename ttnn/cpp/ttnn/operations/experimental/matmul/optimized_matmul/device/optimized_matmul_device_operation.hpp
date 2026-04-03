@@ -20,8 +20,12 @@ namespace ttnn::operations::experimental::matmul::optimized_matmul {
 struct OptimizedMatmulDeviceOperation {
     struct operation_attributes_t {
         MemoryConfig output_memory_config;
+        DataType output_dtype;
         MathFidelity math_fidelity;
+        DataType input_a_dtype;
+        DataType input_b_dtype;
         bool input_a_is_dram;
+        bool input_b_is_dram;
         bool optimized_a_read;
         bool optimized_b_read;
         bool optimized_write;
@@ -32,8 +36,12 @@ struct OptimizedMatmulDeviceOperation {
 
         static constexpr auto attribute_names = std::forward_as_tuple(
             "output_memory_config",
+            "output_dtype",
             "math_fidelity",
+            "input_a_dtype",
+            "input_b_dtype",
             "input_a_is_dram",
+            "input_b_is_dram",
             "optimized_a_read",
             "optimized_b_read",
             "optimized_write",
@@ -44,8 +52,12 @@ struct OptimizedMatmulDeviceOperation {
         auto attribute_values() const {
             return std::forward_as_tuple(
                 output_memory_config,
+                output_dtype,
                 math_fidelity,
+                input_a_dtype,
+                input_b_dtype,
                 input_a_is_dram,
+                input_b_is_dram,
                 optimized_a_read,
                 optimized_b_read,
                 optimized_write,
@@ -96,7 +108,9 @@ struct OptimizedMatmulDeviceOperation {
     static std::tuple<operation_attributes_t, tensor_args_t> invoke(
         const Tensor& input_tensor_a,
         const Tensor& input_tensor_b,
-        std::optional<const DeviceComputeKernelConfig> compute_kernel_config = std::nullopt);
+        std::optional<const DeviceComputeKernelConfig> compute_kernel_config = std::nullopt,
+        const std::optional<const MemoryConfig>& memory_config = std::nullopt,
+        const std::optional<const DataType>& dtype = std::nullopt);
 };
 
 }  // namespace ttnn::operations::experimental::matmul::optimized_matmul

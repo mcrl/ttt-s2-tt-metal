@@ -9,7 +9,7 @@ from models.common.lightweightmodule import LightweightModule
 from models.tt_transformers.tt.ccl import tt_all_reduce
 from models.tt_transformers.tt.common import pad_to_size
 from models.tt_transformers.tt.model_config import OpGroup, TensorGroup
-from models.tt_transformers.tt.common import use_optimized_matmul
+from models.tt_transformers.tt.common import use_optimized_matmul, ttnn_matmul_2dreuse_forced
 
 class MLP(LightweightModule):
     def __init__(
@@ -81,6 +81,10 @@ class MLP(LightweightModule):
         self.w2 = as_sharded_tensor("w2_sharded", ff2_dtype, dims=w2_dims)
         self.w3 = as_sharded_tensor("w3_sharded", ff1_3_dtype, dims=w1_dims)
 
+        self.w1_T = ttnn.transpose(self.w1, 0, 1)
+        self.w2_T = ttnn.transpose(self.w2, 0, 1)
+        self.w3_T = ttnn.transpose(self.w3, 0, 1)
+
         # Default activation is SILU
         self.activation_type = (
             args.mlp_activation_type if hasattr(args, "mlp_activation_type") else ttnn.UnaryOpType.SILU
@@ -125,27 +129,33 @@ class MLP(LightweightModule):
         memory_config = ttnn.L1_MEMORY_CONFIG if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG # TTT
 
         if use_optimized_matmul():
-            x = ttnn.typecast(x, ttnn.bfloat8_b)
-            w1_out = ttnn.experimental.optimized_matmul(x, self.w1)
-            w3_out = ttnn.experimental.optimized_matmul(x, self.w3)
+            if mode == "decode":
+                x_T = ttnn.transpose(ttnn.squeeze(x), 0, 1)
+                w1_out_T = ttnn.experimental.optimized_matmul(self.w1_T, x_T, memory_config=memory_config)
+                w3_out_T = ttnn.experimental.optimized_matmul(self.w3_T, x_T, memory_config=memory_config)
+                w1_out = ttnn.transpose(w1_out_T, 0, 1)
+                w1_out = w1_out.reshape((1, 1, w1_out.shape[-2], w1_out.shape[-1]))
+                w3_out = ttnn.transpose(w3_out_T, 0, 1)
+                w3_out = w3_out.reshape((1, 1, w3_out.shape[-2], w3_out.shape[-1]))
+            else:
+                w1_out = ttnn.experimental.optimized_matmul(x, self.w1, memory_config=memory_config)
+                w3_out = ttnn.experimental.optimized_matmul(x, self.w3, memory_config=memory_config)
         else:
-            w1_out = ttnn.linear(
+            w1_out = ttnn_matmul_2dreuse_forced(
                 x,
                 self.w1,
                 dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
                 core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_1 else None,
                 compute_kernel_config=li_ff1_3_compute_kernel_cfg,
-                program_config=pc_1,
                 memory_config=memory_config,
             )
 
-            w3_out = ttnn.linear(
+            w3_out = ttnn_matmul_2dreuse_forced(
                 x,
                 self.w3,
                 dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
                 core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_3 else None,
                 compute_kernel_config=li_ff1_3_compute_kernel_cfg,
-                program_config=pc_3,
                 memory_config=memory_config,
             )
         ttnn.deallocate(x)
@@ -253,15 +263,18 @@ class MLP(LightweightModule):
 
         if use_optimized_matmul(): # TTT
             if mode == "decode":
-                w2_in = ttnn.to_memory_config(w2_in, ttnn.DRAM_MEMORY_CONFIG)
-            w2_out = ttnn.experimental.optimized_matmul(w2_in, self.w2)
+                w2_in_T = ttnn.transpose(ttnn.squeeze(w2_in), 0, 1)
+                w2_out_T = ttnn.experimental.optimized_matmul(self.w2_T, w2_in_T, memory_config=memory_config)
+                w2_out = ttnn.transpose(w2_out_T, 0, 1)
+                w2_out = w2_out.reshape((1, 1, w2_out.shape[-2], w2_out.shape[-1]))
+            else:
+                w2_out = ttnn.experimental.optimized_matmul(w2_in, self.w2, memory_config=memory_config)
         else:
-            w2_out = ttnn.linear(
+            w2_out = ttnn_matmul_2dreuse_forced(
                 w2_in,
                 self.w2,
                 compute_kernel_config=li_ff2_compute_kernel_cfg,
                 dtype=self.args.ccl_dtype if TG else activation_dtype or ttnn.bfloat16,
-                program_config=pc_2,
                 memory_config=memory_config,
                 core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_2 else None,
             )

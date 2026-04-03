@@ -20,6 +20,23 @@ def use_optimized_matmul():
     """Check if optimized matmul is enabled via environment variable."""
     return os.getenv("TTT_OPTIMIZED_MATMUL", "0") == "1"
 
+def ttnn_matmul_2dreuse_forced(in0, in1, memory_config, dtype, compute_kernel_config, core_grid=None):
+    program_config = ttnn.resolve_matmul_2d_reuse_program_config(
+        in0,
+        in1,
+        dtype=dtype,
+        compute_kernel_config=compute_kernel_config,
+        memory_config=memory_config,
+        core_grid=core_grid,
+    )
+    return ttnn.matmul(in0, in1,
+                       dtype=dtype,
+                       compute_kernel_config=compute_kernel_config,
+                       program_config=program_config,
+                       memory_config=memory_config,
+                       core_grid=core_grid)
+
+
 # TTT Tensor debug utility
 def print_tensor_debug_info(
     tag,

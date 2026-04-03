@@ -17,6 +17,7 @@ namespace ttnn::operations::experimental::matmul::optimized_matmul {
 
 struct OptimizedMatmulVariantSpec {
     bool input_a_is_dram;
+    bool input_b_is_dram;
     bool optimized_a_read;
     bool optimized_b_read;
     bool optimized_write;
@@ -60,6 +61,8 @@ inline OptimizedMatmulVariantSpec resolve_optimized_matmul_variant_spec(
 
     const bool input_a_is_dram = is_interleaved_buffer_type(input_tensor_a, BufferType::DRAM);
     const bool input_a_is_interleaved_l1 = is_interleaved_buffer_type(input_tensor_a, BufferType::L1);
+    const bool input_b_is_dram = is_interleaved_buffer_type(input_tensor_b, BufferType::DRAM);
+    const bool input_b_is_interleaved_l1 = is_interleaved_buffer_type(input_tensor_b, BufferType::L1);
 
     auto active_grid = tt::tt_metal::CoreCoord{8, 8};
     bool optimized_write_use_generated_schedule = false;
@@ -75,8 +78,9 @@ inline OptimizedMatmulVariantSpec resolve_optimized_matmul_variant_spec(
 
     return OptimizedMatmulVariantSpec{
         .input_a_is_dram = input_a_is_dram,
+        .input_b_is_dram = input_b_is_dram,
         .optimized_a_read = !input_a_is_interleaved_l1,
-        .optimized_b_read = true,
+        .optimized_b_read = !input_b_is_interleaved_l1,
         .optimized_write = true,
         .packer_l1_acc = true,
         .optimized_write_use_generated_schedule = optimized_write_use_generated_schedule,
