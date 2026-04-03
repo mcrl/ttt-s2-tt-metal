@@ -700,17 +700,7 @@ class ModelArgs:
             residual_grid = self.dram_shard_core_grid_for_k(self.dim // self.num_devices)
             self.model_config["DECODE_RESIDUAL_MEMCFG"] = (
                 ttnn.L1_MEMORY_CONFIG  # FIXME: when residual add support typecasting for sharded tensors
-                if self.is_galaxy
-                else ttnn.create_sharded_memory_config(
-                    (
-                        self.tile_padded_batch_rows,
-                        self.dim // residual_grid.num_cores // self.num_devices,
-                    ),
-                    residual_grid,
-                    ttnn.ShardStrategy.WIDTH,
-                    ttnn.ShardOrientation.ROW_MAJOR,
-                    use_height_and_width_as_shard_shape=True,
-                )
+                # TTT: Always use L1 memory config for decode
             )
 
             # Chunk values based on what works best empirically
@@ -980,16 +970,7 @@ class ModelArgs:
                 else self.dram_shard_core_grid_for_k_and_n(self.hidden_dim // self.num_devices, self.dim)
             )
 
-            self.model_config["SHARDED_MLP2_INPUT_MEMCFG"] = ttnn.create_sharded_memory_config(
-                (
-                    32 if self.is_galaxy else self.tile_padded_batch_rows,
-                    self.hidden_dim // self.cluster_shape[1] // mlp2_core_grid.num_cores,
-                ),
-                mlp2_core_grid,
-                ttnn.ShardStrategy.WIDTH,
-                ttnn.ShardOrientation.ROW_MAJOR,
-                use_height_and_width_as_shard_shape=True,
-            )
+            self.model_config["SHARDED_MLP2_INPUT_MEMCFG"] = ttnn.L1_MEMORY_CONFIG # TTT: Always use L1 memory config for decode
             self.model_config["DECODE_MLP_W2_PRG_CONFIG"] = self.dram_matmul_config(
                 m=self.tile_padded_batch_rows,
                 k=self.hidden_dim // self.cluster_shape[1],
@@ -1061,17 +1042,7 @@ class ModelArgs:
                 ),
             )
 
-            self.model_config["MLP_ACT_MEMCFG"] = (
-                ttnn.create_sharded_memory_config(
-                    shape=(32, self.dim // 4 // 16),  # dim / num devices / 16 cores
-                    core_grid=ttnn.CoreGrid(x=8, y=2),
-                    strategy=ttnn.ShardStrategy.WIDTH,
-                    orientation=ttnn.ShardOrientation.ROW_MAJOR,
-                    use_height_and_width_as_shard_shape=True,
-                )
-                if self.dim >= 4096
-                else self.model_config["FULL_GRID_MEMCFG"]
-            )
+            self.model_config["MLP_ACT_MEMCFG"] = ttnn.L1_MEMORY_CONFIG # TTT: Always use L1 memory config for MLP activations during decode
 
             if self.is_galaxy:
                 self.model_config["FF1_3_TG_PROGCFG"] = self.matmul_1d_config_from_tensor_shapes(
@@ -2124,6 +2095,7 @@ class ModelArgs:
         return 1  # Fallback to 1 if no divisor found
 
     def dram_matmul_config(self, m: int, k: int, n: int, num_cores=None, fused_activation=None):
+        return None # TTT(jinpyo) - Always use out-of-box GEMM
         # in0_block_w must evenly divide k and be no larger than tile_size * num_cores
         if num_cores is None:
             # num_cores = self.dram_shard_core_grid_for_k(k).num_cores

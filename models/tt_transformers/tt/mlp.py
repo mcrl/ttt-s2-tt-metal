@@ -122,17 +122,12 @@ class MLP(LightweightModule):
 
         # In decode mode (seqlen <= 32) do DRAM sharded matmuls
         # These use HiFi2; this drops 1 bit of the activations but would be FLOP-bound on 12 cores with HiFi4
-        memory_config = ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG
+        memory_config = ttnn.L1_MEMORY_CONFIG if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG # TTT
 
-        if use_optimized_matmul(): # TTT
-            # print(f"[FFN GEMM 1] Using optimized matmul {x.shape=}, {self.w1.shape=} {self.w3.shape=}")
-            # print(f"[FFN GEMM 1] {ttnn.get_memory_config(x)=}")
-            # print(f"[FFN GEMM 1] {ttnn.get_memory_config(self.w1)=}")
-            # print(f"[FFN GEMM 1] {ttnn.get_memory_config(self.w3)=}")
+        if use_optimized_matmul():
+            x = ttnn.typecast(x, ttnn.bfloat8_b)
             w1_out = ttnn.experimental.optimized_matmul(x, self.w1)
             w3_out = ttnn.experimental.optimized_matmul(x, self.w3)
-            # print(f"[FFN GEMM 1] Optimized matmul output {w1_out.shape=}, {ttnn.get_memory_config(w1_out)=}")
-            # print(f"[FFN GEMM 1] Optimized matmul output {w3_out.shape=}, {ttnn.get_memory_config(w3_out)=}")
         else:
             w1_out = ttnn.linear(
                 x,
@@ -257,11 +252,9 @@ class MLP(LightweightModule):
 
 
         if use_optimized_matmul(): # TTT
-            # print(f"[FFN GEMM 2] Using optimized matmul {w2_in.shape=}, {self.w2.shape=}")
-            # print(f"[FFN GEMM 1] {ttnn.get_memory_config(w2_in)=}")
-            # print(f"[FFN GEMM 1] {ttnn.get_memory_config(self.w2)=}")
+            if mode == "decode":
+                w2_in = ttnn.to_memory_config(w2_in, ttnn.DRAM_MEMORY_CONFIG)
             w2_out = ttnn.experimental.optimized_matmul(w2_in, self.w2)
-            # print(f"[FFN GEMM 2] Optimized matmul output {w2_out.shape=}, {ttnn.get_memory_config(w2_out)=}")
         else:
             w2_out = ttnn.linear(
                 w2_in,
