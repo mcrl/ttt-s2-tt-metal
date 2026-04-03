@@ -86,8 +86,17 @@ MathFidelity resolve_optimized_matmul_math_fidelity(
     return math_fidelity;
 }
 
+DataType resolve_optimized_matmul_output_dtype(
+    const Tensor& input_tensor_a, const std::optional<const DataType>& dtype) {
+    return dtype.value_or(input_tensor_a.dtype());
+}
+
 MemoryConfig resolve_optimized_matmul_output_memory_config(const std::optional<const MemoryConfig>& memory_config) {
     return memory_config.value_or(ttnn::DRAM_MEMORY_CONFIG);
+}
+
+bool is_supported_optimized_matmul_dtype(const DataType dtype) {
+    return dtype == DataType::BFLOAT16 || dtype == DataType::BFLOAT8_B;
 }
 
 bool is_supported_optimized_matmul_output_memory_config(const MemoryConfig& memory_config) {
@@ -128,11 +137,18 @@ void validate_inputs(
         "B read is disabled; got {}",
         input_tensor_b.memory_config());
     TT_FATAL(!input_tensor_a.is_sharded() && !input_tensor_b.is_sharded(), "optimized_matmul does not support sharded inputs");
-    TT_FATAL(input_tensor_a.dtype() == input_tensor_b.dtype(), "optimized_matmul requires matching input dtypes");
     TT_FATAL(
-        input_tensor_a.dtype() == DataType::BFLOAT16 || input_tensor_a.dtype() == DataType::BFLOAT8_B,
-        "optimized_matmul currently supports only BFLOAT16 or BFLOAT8_B inputs, got {}",
+        is_supported_optimized_matmul_dtype(input_tensor_a.dtype()),
+        "optimized_matmul currently supports input A only as BFLOAT16 or BFLOAT8_B, got {}",
         input_tensor_a.dtype());
+    TT_FATAL(
+        is_supported_optimized_matmul_dtype(input_tensor_b.dtype()),
+        "optimized_matmul currently supports input B only as BFLOAT16 or BFLOAT8_B, got {}",
+        input_tensor_b.dtype());
+    TT_FATAL(
+        is_supported_optimized_matmul_dtype(operation_attributes.output_dtype),
+        "optimized_matmul currently supports output dtype only as BFLOAT16 or BFLOAT8_B, got {}",
+        operation_attributes.output_dtype);
     TT_FATAL(
         input_tensor_a.device()->arch() == tt::ARCH::WORMHOLE_B0,
         "optimized_matmul currently supports only WORMHOLE_B0, got {}",
@@ -192,6 +208,8 @@ void OptimizedMatmulDeviceOperation::validate_on_program_cache_miss(
         operation_attributes.output_memory_config.is_dram() || !operation_attributes.optimized_write,
         "optimized_matmul optimized write currently supports only DRAM interleaved output; got {}",
         operation_attributes.output_memory_config);
+    const auto resolved_output_dtype = resolve_optimized_matmul_output_dtype(
+        tensor_args.input_tensor_a, std::make_optional(operation_attributes.output_dtype));
     TT_FATAL(
         operation_attributes.math_fidelity == MathFidelity::LoFi ||
             operation_attributes.math_fidelity == MathFidelity::HiFi2 ||
@@ -210,7 +228,10 @@ void OptimizedMatmulDeviceOperation::validate_on_program_cache_miss(
     const bool expected_optimized_write =
         resolved_variant_spec.optimized_write && operation_attributes.output_memory_config.is_dram();
     TT_FATAL(
-        operation_attributes.input_a_is_dram == resolved_variant_spec.input_a_is_dram &&
+        operation_attributes.input_a_dtype == tensor_args.input_tensor_a.dtype() &&
+            operation_attributes.input_b_dtype == tensor_args.input_tensor_b.dtype() &&
+            operation_attributes.output_dtype == resolved_output_dtype &&
+            operation_attributes.input_a_is_dram == resolved_variant_spec.input_a_is_dram &&
             operation_attributes.input_b_is_dram == resolved_variant_spec.input_b_is_dram &&
             operation_attributes.optimized_a_read == resolved_variant_spec.optimized_a_read &&
             operation_attributes.optimized_b_read == resolved_variant_spec.optimized_b_read &&
@@ -238,7 +259,7 @@ OptimizedMatmulDeviceOperation::spec_return_value_t OptimizedMatmulDeviceOperati
     return TensorSpec(
         output_shape,
         TensorLayout::fromPaddedShape(
-            tensor_args.input_tensor_a.dtype(),
+            operation_attributes.output_dtype,
             PageConfig(Layout::TILE),
             operation_attributes.output_memory_config,
             output_shape,
@@ -256,11 +277,14 @@ OptimizedMatmulDeviceOperation::tensor_return_value_t OptimizedMatmulDeviceOpera
     const auto resolved_config = resolve_optimized_matmul_config(
         tensor_args.input_tensor_a,
         tensor_args.input_tensor_b,
+        operation_attributes.output_dtype,
         tt::tt_metal::CoreCoord{operation_attributes.active_grid_x, operation_attributes.active_grid_y});
     const auto buffer_layout = resolve_optimized_matmul_buffer_layout(
         resolved_config,
         variant_spec,
-        tt::tile_size(datatype_to_dataformat_converter(tensor_args.input_tensor_a.dtype())),
+        tt::tile_size(datatype_to_dataformat_converter(operation_attributes.input_a_dtype)),
+        tt::tile_size(datatype_to_dataformat_converter(operation_attributes.input_b_dtype)),
+        tt::tile_size(datatype_to_dataformat_converter(operation_attributes.output_dtype)),
         tensor_args.input_tensor_a.device()->num_dram_channels());
     return create_raw_optim_output_tensor(
         output_spec, tensor_args.input_tensor_a.device(), buffer_layout.c_page_size, buffer_layout.c_total_size);
@@ -271,15 +295,20 @@ OptimizedMatmulDeviceOperation::invoke(
     const Tensor& input_tensor_a,
     const Tensor& input_tensor_b,
     std::optional<const DeviceComputeKernelConfig> compute_kernel_config,
-    const std::optional<const MemoryConfig>& memory_config) {
+    const std::optional<const MemoryConfig>& memory_config,
+    const std::optional<const DataType>& dtype) {
     const auto variant_spec = resolve_optimized_matmul_variant_spec(input_tensor_a, input_tensor_b);
     const auto math_fidelity = resolve_optimized_matmul_math_fidelity(input_tensor_a, compute_kernel_config);
     const auto output_memory_config = resolve_optimized_matmul_output_memory_config(memory_config);
+    const auto output_dtype = resolve_optimized_matmul_output_dtype(input_tensor_a, dtype);
     const bool use_optimized_write = variant_spec.optimized_write && output_memory_config.is_dram();
     return {
         operation_attributes_t{
             output_memory_config,
+            output_dtype,
             math_fidelity,
+            input_tensor_a.dtype(),
+            input_tensor_b.dtype(),
             variant_spec.input_a_is_dram,
             variant_spec.input_b_is_dram,
             variant_spec.optimized_a_read,

@@ -398,7 +398,6 @@ class Attention(LightweightModule):
         # Use HiFi2 for DRAM-sharded matmuls as they are otherwise flop-bound. Loses 1 bit of activation precision.
         ###
         if use_optimized_matmul():
-            x = ttnn.typecast(x, ttnn.bfloat8_b)  # TTT - FIXME
             x_T = ttnn.transpose(ttnn.squeeze(x), 0, 1)
             # xqkv_fused_sharded = ttnn.experimental.optimized_matmul(x, self.wqkv, memory_config=ttnn.L1_MEMORY_CONFIG)
             xqkv_fused_sharded_T = ttnn.experimental.optimized_matmul(self.wqkv_T, x_T, memory_config=ttnn.L1_MEMORY_CONFIG)
@@ -631,7 +630,6 @@ class Attention(LightweightModule):
             # TODO: Fix this once self.TG supports dram-sharded matmuls
             attn_output = ttnn.to_memory_config(attn_output, ttnn.L1_MEMORY_CONFIG)
             if use_optimized_matmul():
-                attn_output = ttnn.typecast(attn_output, ttnn.bfloat8_b) # TTT - FIXME
                 attn_output_T = ttnn.transpose(ttnn.squeeze(attn_output), 0, 1)
                 # dense_out_sharded = ttnn.experimental.optimized_matmul(attn_output, self.wo, memory_config=ttnn.L1_MEMORY_CONFIG)
                 dense_out_sharded_T = ttnn.experimental.optimized_matmul(self.wo_T, attn_output_T, memory_config=ttnn.L1_MEMORY_CONFIG)

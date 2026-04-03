@@ -129,8 +129,6 @@ class MLP(LightweightModule):
         memory_config = ttnn.L1_MEMORY_CONFIG if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG # TTT
 
         if use_optimized_matmul():
-            x = ttnn.typecast(x, ttnn.bfloat8_b)
-
             if mode == "decode":
                 x_T = ttnn.transpose(ttnn.squeeze(x), 0, 1)
                 w1_out_T = ttnn.experimental.optimized_matmul(self.w1_T, x_T, memory_config=memory_config)

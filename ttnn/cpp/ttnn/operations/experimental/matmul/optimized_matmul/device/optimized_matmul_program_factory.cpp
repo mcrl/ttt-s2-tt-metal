@@ -25,6 +25,7 @@ OptimizedMatmulVariantSpec get_program_factory_variant_spec_from_attributes(
     const OptimizedMatmulDeviceOperation::operation_attributes_t& operation_attributes) {
     return {
         .input_a_is_dram = operation_attributes.input_a_is_dram,
+        .input_b_is_dram = operation_attributes.input_b_is_dram,
         .optimized_a_read = operation_attributes.optimized_a_read,
         .optimized_b_read = operation_attributes.optimized_b_read,
         .optimized_write = operation_attributes.optimized_write,
@@ -98,21 +99,40 @@ OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::create(
     const auto resolved_config = resolve_optimized_matmul_config(
         input_tensor_a,
         input_tensor_b,
+        operation_attributes.output_dtype,
         tt::tt_metal::CoreCoord{operation_attributes.active_grid_x, operation_attributes.active_grid_y});
 
     Program program{};
 
     const auto all_cores = get_active_cores(operation_attributes);
-    const auto cb_data_format = datatype_to_dataformat_converter(input_tensor_a.dtype());
+    const auto a_cb_data_format = datatype_to_dataformat_converter(operation_attributes.input_a_dtype);
+    const auto b_cb_data_format = datatype_to_dataformat_converter(operation_attributes.input_b_dtype);
+    const auto output_cb_data_format = datatype_to_dataformat_converter(operation_attributes.output_dtype);
 
     create_data_circular_buffer(
-        program, all_cores, tt::CBIndex::c_0, resolved_config.BMt * resolved_config.BKt * kInputPipelineDepth, cb_data_format);
+        program,
+        all_cores,
+        tt::CBIndex::c_0,
+        resolved_config.BMt * resolved_config.BKt * kInputPipelineDepth,
+        a_cb_data_format);
     create_data_circular_buffer(
-        program, all_cores, tt::CBIndex::c_1, resolved_config.BKt * resolved_config.BNt * kInputPipelineDepth, cb_data_format);
+        program,
+        all_cores,
+        tt::CBIndex::c_1,
+        resolved_config.BKt * resolved_config.BNt * kInputPipelineDepth,
+        b_cb_data_format);
     create_data_circular_buffer(
-        program, all_cores, tt::CBIndex::c_16, resolved_config.BMt * resolved_config.BNt * kOutputPipelineDepth, cb_data_format);
+        program,
+        all_cores,
+        tt::CBIndex::c_16,
+        resolved_config.BMt * resolved_config.BNt * kOutputPipelineDepth,
+        output_cb_data_format);
     create_data_circular_buffer(
-        program, all_cores, tt::CBIndex::c_24, resolved_config.BMt * resolved_config.BNt * kOutputPipelineDepth, cb_data_format);
+        program,
+        all_cores,
+        tt::CBIndex::c_24,
+        resolved_config.BMt * resolved_config.BNt * kOutputPipelineDepth,
+        output_cb_data_format);
     create_sync_circular_buffer(program, all_cores, tt::CBIndex::c_25);
     create_sync_circular_buffer(program, all_cores, tt::CBIndex::c_26);
 

@@ -17,7 +17,8 @@ struct OptimizedMatmulOperation {
         const Tensor& input_tensor_a,
         const Tensor& input_tensor_b,
         std::optional<const DeviceComputeKernelConfig> compute_kernel_config = std::nullopt,
-        const std::optional<const MemoryConfig>& memory_config = std::nullopt);
+        const std::optional<const MemoryConfig>& memory_config = std::nullopt,
+        const std::optional<const DataType>& dtype = std::nullopt);
 };
 
 }  // namespace ttnn::operations::experimental::matmul

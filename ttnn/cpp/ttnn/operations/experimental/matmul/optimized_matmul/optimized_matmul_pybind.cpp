@@ -28,9 +28,11 @@ void bind_optimized_matmul(py::module& module) {
             Current constraints:
             - input_tensor_a must use DRAM interleaved memory, or interleaved L1 to trigger a standard-read fallback
             - input_tensor_b must use DRAM interleaved memory, or interleaved L1 to trigger a standard-read fallback
+            - input_tensor_a, input_tensor_b, and dtype independently support BFLOAT16 and BFLOAT8_B
             - output supports ttnn.DRAM_MEMORY_CONFIG and ttnn.L1_MEMORY_CONFIG
             - L1 output triggers a standard-write fallback
             - both inputs must be device TILE tensors
+            - dtype is optional and controls output dtype; when omitted it defaults to input_tensor_a.dtype()
             - compute_kernel_config is optional and currently only math_fidelity is consumed
             - supported math_fidelity values are LoFi, HiFi2, and HiFi4
         )doc",
@@ -39,13 +41,15 @@ void bind_optimized_matmul(py::module& module) {
                const Tensor& input_tensor_a,
                const Tensor& input_tensor_b,
                const std::optional<const DeviceComputeKernelConfig> compute_kernel_config,
-               const std::optional<const MemoryConfig>& memory_config) {
-                return self(input_tensor_a, input_tensor_b, compute_kernel_config, memory_config);
+               const std::optional<const MemoryConfig>& memory_config,
+               const std::optional<const DataType>& dtype) {
+                return self(input_tensor_a, input_tensor_b, compute_kernel_config, memory_config, dtype);
             },
             py::arg("input_tensor_a").noconvert(),
             py::arg("input_tensor_b").noconvert(),
             py::arg("compute_kernel_config").noconvert() = std::nullopt,
-            py::arg("memory_config").noconvert() = std::nullopt});
+            py::arg("memory_config").noconvert() = std::nullopt,
+            py::arg("dtype") = std::nullopt});
 }
 
 }  // namespace ttnn::operations::experimental::matmul::detail

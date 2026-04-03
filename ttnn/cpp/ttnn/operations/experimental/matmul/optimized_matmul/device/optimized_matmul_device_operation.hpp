@@ -20,7 +20,10 @@ namespace ttnn::operations::experimental::matmul::optimized_matmul {
 struct OptimizedMatmulDeviceOperation {
     struct operation_attributes_t {
         MemoryConfig output_memory_config;
+        DataType output_dtype;
         MathFidelity math_fidelity;
+        DataType input_a_dtype;
+        DataType input_b_dtype;
         bool input_a_is_dram;
         bool input_b_is_dram;
         bool optimized_a_read;
@@ -33,7 +36,10 @@ struct OptimizedMatmulDeviceOperation {
 
         static constexpr auto attribute_names = std::forward_as_tuple(
             "output_memory_config",
+            "output_dtype",
             "math_fidelity",
+            "input_a_dtype",
+            "input_b_dtype",
             "input_a_is_dram",
             "input_b_is_dram",
             "optimized_a_read",
@@ -46,7 +52,10 @@ struct OptimizedMatmulDeviceOperation {
         auto attribute_values() const {
             return std::forward_as_tuple(
                 output_memory_config,
+                output_dtype,
                 math_fidelity,
+                input_a_dtype,
+                input_b_dtype,
                 input_a_is_dram,
                 input_b_is_dram,
                 optimized_a_read,
@@ -100,7 +109,8 @@ struct OptimizedMatmulDeviceOperation {
         const Tensor& input_tensor_a,
         const Tensor& input_tensor_b,
         std::optional<const DeviceComputeKernelConfig> compute_kernel_config = std::nullopt,
-        const std::optional<const MemoryConfig>& memory_config = std::nullopt);
+        const std::optional<const MemoryConfig>& memory_config = std::nullopt,
+        const std::optional<const DataType>& dtype = std::nullopt);
 };
 
 }  // namespace ttnn::operations::experimental::matmul::optimized_matmul
