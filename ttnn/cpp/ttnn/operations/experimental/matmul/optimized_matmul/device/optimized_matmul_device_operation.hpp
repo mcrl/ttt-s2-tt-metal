@@ -22,6 +22,7 @@ struct OptimizedMatmulDeviceOperation {
         MemoryConfig output_memory_config;
         MathFidelity math_fidelity;
         bool input_a_is_dram;
+        bool input_b_is_dram;
         bool optimized_a_read;
         bool optimized_b_read;
         bool optimized_write;
@@ -34,6 +35,7 @@ struct OptimizedMatmulDeviceOperation {
             "output_memory_config",
             "math_fidelity",
             "input_a_is_dram",
+            "input_b_is_dram",
             "optimized_a_read",
             "optimized_b_read",
             "optimized_write",
@@ -46,6 +48,7 @@ struct OptimizedMatmulDeviceOperation {
                 output_memory_config,
                 math_fidelity,
                 input_a_is_dram,
+                input_b_is_dram,
                 optimized_a_read,
                 optimized_b_read,
                 optimized_write,
@@ -96,7 +99,8 @@ struct OptimizedMatmulDeviceOperation {
     static std::tuple<operation_attributes_t, tensor_args_t> invoke(
         const Tensor& input_tensor_a,
         const Tensor& input_tensor_b,
-        std::optional<const DeviceComputeKernelConfig> compute_kernel_config = std::nullopt);
+        std::optional<const DeviceComputeKernelConfig> compute_kernel_config = std::nullopt,
+        const std::optional<const MemoryConfig>& memory_config = std::nullopt);
 };
 
 }  // namespace ttnn::operations::experimental::matmul::optimized_matmul

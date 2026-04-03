@@ -11,7 +11,7 @@ from models.common.lightweightmodule import LightweightModule
 from models.common.rmsnorm import RMSNorm
 from models.tt_transformers.tt.ccl import tt_all_gather, tt_all_reduce
 from models.tt_transformers.tt.model_config import OpGroup, TensorGroup
-from models.tt_transformers.tt.common import use_optimized_matmul
+from models.tt_transformers.tt.common import use_optimized_matmul, ttnn_matmul_2dreuse_forced
 
 class Attention(LightweightModule):
     def __init__(
@@ -243,6 +243,7 @@ class Attention(LightweightModule):
             ),
             cache_file_name=cache_name("wqkv_sharded_2d"),
         )
+        self.wqkv_T = ttnn.transpose(ttnn.squeeze(self.wqkv), 0, 1)
 
         def norm_reshard(x, norm, mode):
             """Hack until RMSNorm supports height-sharded output config"""
@@ -318,6 +319,8 @@ class Attention(LightweightModule):
                 cache_name("wo_width_sharded_2d") if (self.use_fused_all_gather_matmul or self.TG) else cache_name("wo")
             ),
         )
+        self.wo_T = ttnn.transpose(ttnn.squeeze(self.wo), 0, 1)
+
         if not use_paged_kv_cache:
             # vLLM provides its own kv cache
             self.init_kv_cache(configuration, weight_cache_path)
@@ -395,15 +398,17 @@ class Attention(LightweightModule):
         # Use HiFi2 for DRAM-sharded matmuls as they are otherwise flop-bound. Loses 1 bit of activation precision.
         ###
         if use_optimized_matmul():
-            x = ttnn.typecast(x, ttnn.bfloat8_b)
-            xqkv_fused_sharded = ttnn.experimental.optimized_matmul(x, self.wqkv)
+            x = ttnn.typecast(x, ttnn.bfloat8_b)  # TTT - FIXME
+            x_T = ttnn.transpose(ttnn.squeeze(x), 0, 1)
+            # xqkv_fused_sharded = ttnn.experimental.optimized_matmul(x, self.wqkv, memory_config=ttnn.L1_MEMORY_CONFIG)
+            xqkv_fused_sharded_T = ttnn.experimental.optimized_matmul(self.wqkv_T, x_T, memory_config=ttnn.L1_MEMORY_CONFIG)
+            xqkv_fused_sharded = ttnn.transpose(xqkv_fused_sharded_T, 0, 1)
+            xqkv_fused_sharded = xqkv_fused_sharded.reshape((1, 1, xqkv_fused_sharded.shape[-2], xqkv_fused_sharded.shape[-1]))
         else:
-            xqkv_fused_sharded = ttnn.linear(
+            xqkv_fused_sharded = ttnn_matmul_2dreuse_forced(
                 x,
                 self.wqkv,
-                # bias=self.wqkv_bias,
-                memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
-                program_config=self.model_config["XQKV_DECODE_PROGCFG"],
+                memory_config=ttnn.L1_MEMORY_CONFIG,
                 compute_kernel_config=self.li_qkv_decode_compute_kernel_cfg,
                 dtype=self.ccl_dtype if self.TG else self.activation_dtype or ttnn.bfloat16,
             )
@@ -441,7 +446,8 @@ class Attention(LightweightModule):
             if use_optimized_matmul():
                 xqkv_fused = ttnn.typecast(xqkv_fused_sharded, ttnn.bfloat16)
             else:
-                xqkv_fused = ttnn.sharded_to_interleaved(xqkv_fused_sharded, ttnn.L1_MEMORY_CONFIG, ttnn.bfloat16)
+                xqkv_fused = ttnn.typecast(xqkv_fused_sharded, ttnn.bfloat16)
+                # xqkv_fused = ttnn.sharded_to_interleaved(xqkv_fused_sharded, ttnn.L1_MEMORY_CONFIG, ttnn.bfloat16)
 
         ttnn.deallocate(xqkv_fused_sharded)
 
@@ -623,18 +629,21 @@ class Attention(LightweightModule):
                 )
 
             # TODO: Fix this once self.TG supports dram-sharded matmuls
+            attn_output = ttnn.to_memory_config(attn_output, ttnn.L1_MEMORY_CONFIG)
             if use_optimized_matmul():
-                attn_output = ttnn.to_memory_config(attn_output, ttnn.DRAM_MEMORY_CONFIG)
-                attn_output = ttnn.typecast(attn_output, ttnn.bfloat8_b)
-                dense_out_sharded = ttnn.experimental.optimized_matmul(attn_output, self.wo)
+                attn_output = ttnn.typecast(attn_output, ttnn.bfloat8_b) # TTT - FIXME
+                attn_output_T = ttnn.transpose(ttnn.squeeze(attn_output), 0, 1)
+                # dense_out_sharded = ttnn.experimental.optimized_matmul(attn_output, self.wo, memory_config=ttnn.L1_MEMORY_CONFIG)
+                dense_out_sharded_T = ttnn.experimental.optimized_matmul(self.wo_T, attn_output_T, memory_config=ttnn.L1_MEMORY_CONFIG)
+                dense_out_sharded = ttnn.transpose(dense_out_sharded_T, 0, 1)
+                dense_out_sharded = ttnn.reshape(dense_out_sharded, (1, 1, dense_out_sharded.shape[-2], dense_out_sharded.shape[-1]))
             else:
-                dense_out_sharded = ttnn.matmul(
+                dense_out_sharded = ttnn_matmul_2dreuse_forced(
                     attn_output,
                     self.wo,
                     core_grid=ttnn.CoreGrid(y=4, x=8) if self.TG else None,
-                    program_config=self.model_config["ATTN_OUTPUT_PROGCFG"] if not self.TG else None,
-                    memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
                     dtype=ttnn.bfloat8_b if self.TG else None,
+                    memory_config=ttnn.L1_MEMORY_CONFIG,
                     compute_kernel_config=self.li_o_decode_compute_kernel_cfg,
                 )
 

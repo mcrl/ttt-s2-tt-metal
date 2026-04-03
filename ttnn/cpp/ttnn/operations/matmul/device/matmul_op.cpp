@@ -700,13 +700,14 @@ inline MatmulMultiCoreReuseMultiCastProgramConfig create_forced_simple_matmul_2d
         input_tensor_b.memory_config().memory_layout() == TensorMemoryLayout::INTERLEAVED;
     const bool input_a_supported = input_tensor_a.memory_config().buffer_type() == BufferType::DRAM ||
                                    input_tensor_a.memory_config().buffer_type() == BufferType::L1;
-    const bool input_b_supported = input_tensor_b.memory_config().buffer_type() == BufferType::DRAM;
+    const bool input_b_supported = input_tensor_b.memory_config().buffer_type() == BufferType::DRAM ||
+                                   input_tensor_b.memory_config().buffer_type() == BufferType::L1;
     const bool output_supported =
         output_mem_config.buffer_type() == BufferType::DRAM || output_mem_config.buffer_type() == BufferType::L1;
     TT_FATAL(
         all_interleaved && input_a_supported && input_b_supported && output_supported,
         "Forced 2D reuse resolver currently supports only interleaved inputs, with input A in DRAM or L1, "
-        "input B in DRAM, and output in DRAM or L1");
+        "input B in DRAM or L1, and output in DRAM or L1");
 
     uint32_t k_tiles_per_core = Kt % num_cores_x == 0 ? Kt / num_cores_x : 1;
     k_tiles_per_core = cap_in0_block_w(k_tiles_per_core, in0_block_w_cap);

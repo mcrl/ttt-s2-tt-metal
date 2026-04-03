@@ -133,6 +133,8 @@ OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::create(
         operation_attributes.active_grid_x,
         operation_attributes.active_grid_y,
         operation_attributes.input_a_is_dram ? 1U : 0U,
+        operation_attributes.input_b_is_dram ? 1U : 0U,
+        operation_attributes.output_memory_config.is_dram() ? 1U : 0U,
     };
 
     const auto kernel_defines = create_kernel_defines(variant_spec);

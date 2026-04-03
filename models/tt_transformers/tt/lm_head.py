@@ -9,7 +9,7 @@ import torch
 import ttnn
 from models.common.lightweightmodule import LightweightModule
 from models.tt_transformers.tt.ccl import tt_all_reduce
-from models.tt_transformers.tt.common import use_optimized_matmul
+from models.tt_transformers.tt.common import use_optimized_matmul, ttnn_matmul_2dreuse_forced
 
 
 class LMHead(LightweightModule):
@@ -162,11 +162,10 @@ class LMHead(LightweightModule):
                 else:
                     output = ttnn.experimental.optimized_matmul(x, weight)
             else:
-                output = ttnn.linear(
+                output = ttnn_matmul_2dreuse_forced(
                     x,
                     weight,
                     compute_kernel_config=self.compute_kernel_config,
-                    # program_config=pc, # TTT
                     # memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
                     memory_config=ttnn.DRAM_MEMORY_CONFIG,  # TTT (jinpyo)
                     dtype=self.args.lm_head_dtype if hasattr(self.args, "lm_head_dtype") else ttnn.bfloat8_b,
