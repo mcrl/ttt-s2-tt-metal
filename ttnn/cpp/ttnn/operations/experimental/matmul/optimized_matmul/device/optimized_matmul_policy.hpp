@@ -16,6 +16,7 @@
 namespace ttnn::operations::experimental::matmul::optimized_matmul {
 
 struct OptimizedMatmulVariantSpec {
+    bool input_a_is_dram;
     bool optimized_a_read;
     bool optimized_b_read;
     bool optimized_write;
@@ -23,6 +24,12 @@ struct OptimizedMatmulVariantSpec {
     bool optimized_write_use_generated_schedule;
     tt::tt_metal::CoreCoord active_grid;
 };
+
+inline bool is_interleaved_buffer_type(const Tensor& tensor, const BufferType buffer_type) {
+    const auto& memory_config = tensor.memory_config();
+    return !tensor.is_sharded() && memory_config.memory_layout() == TensorMemoryLayout::INTERLEAVED &&
+           memory_config.buffer_type() == buffer_type;
+}
 
 inline std::map<std::string, std::string> get_optimized_matmul_kernel_defines(
     const OptimizedMatmulVariantSpec& variant_spec) {
@@ -51,31 +58,30 @@ inline OptimizedMatmulVariantSpec resolve_optimized_matmul_variant_spec(
     (void)nt;
     (void)kt;
 
-    const auto all_optim_on = OptimizedMatmulVariantSpec{
-        .optimized_a_read = true,
-        .optimized_b_read = true,
-        .optimized_write = true,
-        .packer_l1_acc = true,
-        .optimized_write_use_generated_schedule = false,
-        .active_grid = tt::tt_metal::CoreCoord{8, 8},
-    };
+    const bool input_a_is_dram = is_interleaved_buffer_type(input_tensor_a, BufferType::DRAM);
+    const bool input_a_is_interleaved_l1 = is_interleaved_buffer_type(input_tensor_a, BufferType::L1);
+
+    auto active_grid = tt::tt_metal::CoreCoord{8, 8};
+    bool optimized_write_use_generated_schedule = false;
 
     // When both Mt and Nt are 1, prefer the Mt==1 rule.
     if (mt == 1) {
-        auto spec = all_optim_on;
-        spec.optimized_write_use_generated_schedule = true;
-        spec.active_grid = tt::tt_metal::CoreCoord{8, 1};
-        return spec;
+        optimized_write_use_generated_schedule = true;
+        active_grid = tt::tt_metal::CoreCoord{8, 1};
+    } else if (nt == 1) {
+        optimized_write_use_generated_schedule = true;
+        active_grid = tt::tt_metal::CoreCoord{1, 8};
     }
 
-    if (nt == 1) {
-        auto spec = all_optim_on;
-        spec.optimized_write_use_generated_schedule = true;
-        spec.active_grid = tt::tt_metal::CoreCoord{1, 8};
-        return spec;
-    }
-
-    return all_optim_on;
+    return OptimizedMatmulVariantSpec{
+        .input_a_is_dram = input_a_is_dram,
+        .optimized_a_read = !input_a_is_interleaved_l1,
+        .optimized_b_read = true,
+        .optimized_write = true,
+        .packer_l1_acc = true,
+        .optimized_write_use_generated_schedule = optimized_write_use_generated_schedule,
+        .active_grid = active_grid,
+    };
 }
 
 }  // namespace ttnn::operations::experimental::matmul::optimized_matmul

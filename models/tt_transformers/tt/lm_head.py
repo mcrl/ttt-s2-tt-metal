@@ -154,17 +154,13 @@ class LMHead(LightweightModule):
     def forward(self, x: ttnn.Tensor):
         outputs = []
         for weight, weight_T, pc in zip(self.output_weights, self.output_weights_T, self.program_configs):
-            if use_optimized_matmul(): # TTT
-                # print(f"[LMHead] Using optimized matmul {x.shape=}, {weight.shape=}")
-                # print(f"[LMHead] {ttnn.get_memory_config(x)=}")
-                # print(f"[LMHead] {ttnn.get_memory_config(weight)=}")
+            if use_optimized_matmul():
                 if x.shape[-2] == 32:
                     x_T = ttnn.transpose(x.reshape((x.shape[-2], x.shape[-1])), 0, 1) # [1, 1, B, H] -> [H, B]
                     output = ttnn.experimental.optimized_matmul(weight_T, x_T)
                     output = ttnn.transpose(output, 0, 1).reshape((1, 1, x.shape[2], weight.shape[-1])) # [V/split, B] -> [1, 1, B, V/split]
                 else:
                     output = ttnn.experimental.optimized_matmul(x, weight)
-                # print(f"[LMHead] Optimized matmul output {output.shape=}, {ttnn.get_memory_config(output)=}")
             else:
                 output = ttnn.linear(
                     x,

@@ -395,19 +395,8 @@ class Attention(LightweightModule):
         # Use HiFi2 for DRAM-sharded matmuls as they are otherwise flop-bound. Loses 1 bit of activation precision.
         ###
         if use_optimized_matmul():
-            # print(f"[QKV projection] Using optimized matmul {x.shape=}, {self.wqkv.shape=}")
-            # print(f"[QKV projection] {ttnn.get_memory_config(x)=}")
-            # print(f"[QKV projection] {ttnn.get_memory_config(self.wqkv)=}")
+            x = ttnn.typecast(x, ttnn.bfloat8_b)
             xqkv_fused_sharded = ttnn.experimental.optimized_matmul(x, self.wqkv)
-            # xqkv_fused_sharded = ttnn.to_memory_config(
-            # xqkv_fused_sharded,
-            # ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
-            # dtype=self.ccl_dtype if self.TG else self.activation_dtype or ttnn.bfloat16,
-            # )
-            # print(
-            #     f"[QKV projection] Optimized matmul output {xqkv_fused_sharded.shape=}, "
-            #     f"{ttnn.get_memory_config(xqkv_fused_sharded)=}"
-            # )
         else:
             xqkv_fused_sharded = ttnn.linear(
                 x,
@@ -449,7 +438,10 @@ class Attention(LightweightModule):
             )
         else:
             # bfloat16 is required by nlp_create_qkv_heads_decode
-            xqkv_fused = ttnn.sharded_to_interleaved(xqkv_fused_sharded, ttnn.L1_MEMORY_CONFIG, ttnn.bfloat16)
+            if use_optimized_matmul():
+                xqkv_fused = ttnn.typecast(xqkv_fused_sharded, ttnn.bfloat16)
+            else:
+                xqkv_fused = ttnn.sharded_to_interleaved(xqkv_fused_sharded, ttnn.L1_MEMORY_CONFIG, ttnn.bfloat16)
 
         ttnn.deallocate(xqkv_fused_sharded)
 
@@ -632,14 +624,9 @@ class Attention(LightweightModule):
 
             # TODO: Fix this once self.TG supports dram-sharded matmuls
             if use_optimized_matmul():
-                print(f"[O projection] Using optimized matmul {attn_output.shape=}, {self.wo.shape=}")
-                print(f"[O projection] {ttnn.get_memory_config(attn_output)=}")
-                print(f"[O projection] {ttnn.get_memory_config(self.wo)=}")
+                attn_output = ttnn.to_memory_config(attn_output, ttnn.DRAM_MEMORY_CONFIG)
+                attn_output = ttnn.typecast(attn_output, ttnn.bfloat8_b)
                 dense_out_sharded = ttnn.experimental.optimized_matmul(attn_output, self.wo)
-                print(
-                    f"[O projection] Optimized matmul output {dense_out_sharded.shape=}, "
-                    f"{ttnn.get_memory_config(dense_out_sharded)=}"
-                )
             else:
                 dense_out_sharded = ttnn.matmul(
                     attn_output,
@@ -707,11 +694,7 @@ class Attention(LightweightModule):
             x_11SH = ttnn.reshape(x_11SH, [1, seq_len // self.MAX_QKV_MM_SEQ_LEN, self.MAX_QKV_MM_SEQ_LEN, -1])
 
         if use_optimized_matmul():
-            # print(f"[QKV projection] Using optimized matmul {x_11SH.shape=}, {self.wqkv.shape=}")
-            # print(f"[QKV projection] {ttnn.get_memory_config(x_11SH)=}")
-            # print(f"[QKV projection] {ttnn.get_memory_config(self.wqkv)=}")
             xqkv_fused = ttnn.experimental.optimized_matmul(x_11SH, self.wqkv)
-            # print(f"[QKV projection] Optimized matmul output {xqkv_fused.shape=}, {ttnn.get_memory_config(xqkv_fused)=}")
         else:
             xqkv_fused = ttnn.linear(
                 x_11SH,
@@ -907,11 +890,7 @@ class Attention(LightweightModule):
 
 
         if use_optimized_matmul():
-            # print(f"[O projection] Using optimized matmul {attn_output_11SH.shape=}, {self.wo.shape=}")
-            # print(f"[O projection] {ttnn.get_memory_config(attn_output_11SH)=}")
-            # print(f"[O projection] {ttnn.get_memory_config(self.wo)=}")
             output_11SH = ttnn.experimental.optimized_matmul(attn_output_11SH, self.wo)
-            # print(f"[O projection] Optimized matmul output {output_11SH.shape=}, {ttnn.get_memory_config(output_11SH)=}")
         else:
             output_11SH = ttnn.linear(
                 attn_output_11SH,

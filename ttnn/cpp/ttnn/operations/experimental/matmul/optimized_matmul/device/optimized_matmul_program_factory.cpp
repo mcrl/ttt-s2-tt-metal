@@ -24,6 +24,7 @@ namespace {
 OptimizedMatmulVariantSpec get_program_factory_variant_spec_from_attributes(
     const OptimizedMatmulDeviceOperation::operation_attributes_t& operation_attributes) {
     return {
+        .input_a_is_dram = operation_attributes.input_a_is_dram,
         .optimized_a_read = operation_attributes.optimized_a_read,
         .optimized_b_read = operation_attributes.optimized_b_read,
         .optimized_write = operation_attributes.optimized_write,
@@ -131,6 +132,7 @@ OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::create(
         global_slave_sem,
         operation_attributes.active_grid_x,
         operation_attributes.active_grid_y,
+        operation_attributes.input_a_is_dram ? 1U : 0U,
     };
 
     const auto kernel_defines = create_kernel_defines(variant_spec);

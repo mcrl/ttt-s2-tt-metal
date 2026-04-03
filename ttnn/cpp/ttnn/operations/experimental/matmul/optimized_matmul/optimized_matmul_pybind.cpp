@@ -26,7 +26,7 @@ void bind_optimized_matmul(py::module& module) {
             minimal device program path under optimized_matmul/.
 
             Current constraints:
-            - input_tensor_a must use ttnn.DRAM_MEMORY_CONFIG
+            - input_tensor_a must use DRAM interleaved memory, or interleaved L1 to trigger a standard-read fallback
             - input_tensor_b must use ttnn.DRAM_MEMORY_CONFIG
             - output is always produced with ttnn.DRAM_MEMORY_CONFIG
             - both inputs must be device TILE tensors

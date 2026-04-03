@@ -20,6 +20,42 @@ def use_optimized_matmul():
     """Check if optimized matmul is enabled via environment variable."""
     return os.getenv("TTT_OPTIMIZED_MATMUL", "0") == "1"
 
+# TTT Tensor debug utility
+def print_tensor_debug_info(
+    tag,
+    *,
+    input_tensors=None,
+    output_tensors=None,
+    include_input_dtype=False,
+    include_output_dtype=False,
+):
+    def _normalize_named_tensors(tensors):
+        if tensors is None:
+            return []
+        if hasattr(tensors, "items"):
+            return list(tensors.items())
+        return list(tensors)
+
+    input_items = _normalize_named_tensors(input_tensors)
+    if input_items:
+        input_parts = [f"{name}.shape={tensor.shape}" for name, tensor in input_items]
+        if include_input_dtype:
+            input_parts.extend(f"{name}.dtype={tensor.dtype}" for name, tensor in input_items)
+        print(f"[{tag}] Using optimized matmul " + ", ".join(input_parts))
+        for name, tensor in input_items:
+            print(f"[{tag}] ttnn.get_memory_config({name})={ttnn.get_memory_config(tensor)}")
+
+    for name, tensor in _normalize_named_tensors(output_tensors):
+        output_line = (
+            f"[{tag}] Optimized matmul output "
+            f"{name}.shape={tensor.shape}, "
+            f"ttnn.get_memory_config({name})={ttnn.get_memory_config(tensor)}"
+        )
+        if include_output_dtype:
+            output_line += f" {name}.dtype={tensor.dtype}"
+        print(output_line)
+
+
 class HostEmbedding(torch.nn.Module):
     def __init__(self, model_args):
         super().__init__()
