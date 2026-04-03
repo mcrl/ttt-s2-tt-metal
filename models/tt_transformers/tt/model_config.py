@@ -1581,9 +1581,9 @@ class ModelArgs:
                 self.model_name = os.path.basename(normalized_path)
             logger.info(f"Model name from config: {self.model_name}")
 
-        if self.base_model_name == "Qwen2.5-7B" and self.num_devices not in [0, 2, 4]:
+        if self.base_model_name == "Qwen2.5-7B" and self.num_devices not in [0, 1, 2, 4]:
             raise AssertionError(
-                "Qwen2.5-7B is only supported on 2 or 4 devices, run on an N300 or use MESH_DEVICE=N150x4"
+                "Qwen2.5-7B is only supported on 1, 2, or 4 devices, run on an N150, N300, or use MESH_DEVICE=N150x4"
             )
 
         self.unpadded_hidden_dim = self.hidden_dim

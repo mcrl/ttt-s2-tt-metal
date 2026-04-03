@@ -702,7 +702,7 @@ def prepare_generator_args(
 )
 @pytest.mark.parametrize(
     "device_params",
-    [{"fabric_config": True, "trace_region_size": 50000000, "num_command_queues": 1, "physical_device_ids": [0]}],
+    [{"fabric_config": True, "trace_region_size": 50000000, "num_command_queues": 1}],
     indirect=True,
 )
 @pytest.mark.parametrize(
