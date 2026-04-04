@@ -243,7 +243,9 @@ class Attention(LightweightModule):
             ),
             cache_file_name=cache_name("wqkv_sharded_2d"),
         )
-        self.wqkv_T = ttnn.transpose(ttnn.squeeze(self.wqkv), 0, 1)
+        # self.wqkv_T = ttnn.transpose(ttnn.squeeze(self.wqkv), 0, 1)
+        # Temporary: optimized matmul is disabled, so do not materialize transposed weights.
+        self.wqkv_T = None
 
         def norm_reshard(x, norm, mode):
             """Hack until RMSNorm supports height-sharded output config"""
@@ -319,7 +321,9 @@ class Attention(LightweightModule):
                 cache_name("wo_width_sharded_2d") if (self.use_fused_all_gather_matmul or self.TG) else cache_name("wo")
             ),
         )
-        self.wo_T = ttnn.transpose(ttnn.squeeze(self.wo), 0, 1)
+        # self.wo_T = ttnn.transpose(ttnn.squeeze(self.wo), 0, 1)
+        # Temporary: optimized matmul is disabled, so do not materialize transposed weights.
+        self.wo_T = None
 
         if not use_paged_kv_cache:
             # vLLM provides its own kv cache

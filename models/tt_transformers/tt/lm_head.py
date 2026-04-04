@@ -86,7 +86,9 @@ class LMHead(LightweightModule):
                     cache_file_name=cache_file_name,
                 )
             self.output_weights.append(output_weight)
-            self.output_weights_T.append(ttnn.transpose(output_weight, 0, 1))
+            # self.output_weights_T.append(ttnn.transpose(output_weight, 0, 1))
+            # Temporary: optimized matmul is disabled, so do not materialize transposed weights.
+            self.output_weights_T.append(None)
         else:
             for i, split_size in enumerate(split_sizes):
                 # Create a list to store the split tensors for each device
@@ -118,7 +120,9 @@ class LMHead(LightweightModule):
                         cache_file_name=cache_file_name,
                     )
                 self.output_weights.append(output_weight)
-                self.output_weights_T.append(ttnn.transpose(output_weight, 0, 1))
+                # self.output_weights_T.append(ttnn.transpose(output_weight, 0, 1))
+                # Temporary: optimized matmul is disabled, so do not materialize transposed weights.
+                self.output_weights_T.append(None)
 
         self.compute_kernel_config = ttnn.WormholeComputeKernelConfig(
             math_fidelity=ttnn.MathFidelity.HiFi2,

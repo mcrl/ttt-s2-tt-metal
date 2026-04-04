@@ -81,9 +81,13 @@ class MLP(LightweightModule):
         self.w2 = as_sharded_tensor("w2_sharded", ff2_dtype, dims=w2_dims)
         self.w3 = as_sharded_tensor("w3_sharded", ff1_3_dtype, dims=w1_dims)
 
-        self.w1_T = ttnn.transpose(self.w1, 0, 1)
-        self.w2_T = ttnn.transpose(self.w2, 0, 1)
-        self.w3_T = ttnn.transpose(self.w3, 0, 1)
+        # self.w1_T = ttnn.transpose(self.w1, 0, 1)
+        # self.w2_T = ttnn.transpose(self.w2, 0, 1)
+        # self.w3_T = ttnn.transpose(self.w3, 0, 1)
+        # Temporary: optimized matmul is disabled, so do not materialize transposed weights.
+        self.w1_T = None
+        self.w2_T = None
+        self.w3_T = None
 
         # Default activation is SILU
         self.activation_type = (
