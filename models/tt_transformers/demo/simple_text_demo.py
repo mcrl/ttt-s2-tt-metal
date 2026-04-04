@@ -1129,7 +1129,7 @@ def test_demo_text(
                 if len(text) > 100:
                     text = "..." + text[-97:]
                 text = text.replace("\n", " ")
-                logger.debug("[User {}] {}".format(user, text))
+                # logger.debug("[User {}] {}".format(user, text))
 
             iteration += 1
 
