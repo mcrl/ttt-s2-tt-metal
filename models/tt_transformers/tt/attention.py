@@ -11,7 +11,7 @@ from models.common.lightweightmodule import LightweightModule
 from models.common.rmsnorm import RMSNorm
 from models.tt_transformers.tt.ccl import tt_all_gather, tt_all_reduce
 from models.tt_transformers.tt.model_config import OpGroup, TensorGroup
-from models.tt_transformers.tt.common import use_optimized_matmul, ttnn_matmul_2dreuse_forced
+from models.tt_transformers.tt.common import use_optimized_matmul, ttnn_matmul_2dreuse_forced, use_optimized_matmul_transposed
 
 class Attention(LightweightModule):
     def __init__(
@@ -243,7 +243,9 @@ class Attention(LightweightModule):
             ),
             cache_file_name=cache_name("wqkv_sharded_2d"),
         )
-        self.wqkv_T = ttnn.transpose(ttnn.squeeze(self.wqkv), 0, 1)
+        if use_optimized_matmul() and use_optimized_matmul_transposed():
+            self.wqkv_T = ttnn.transpose(ttnn.squeeze(self.wqkv), 0, 1)
+            ttnn.deallocate(self.wqkv)
 
         def norm_reshard(x, norm, mode):
             """Hack until RMSNorm supports height-sharded output config"""
@@ -319,7 +321,10 @@ class Attention(LightweightModule):
                 cache_name("wo_width_sharded_2d") if (self.use_fused_all_gather_matmul or self.TG) else cache_name("wo")
             ),
         )
-        self.wo_T = ttnn.transpose(ttnn.squeeze(self.wo), 0, 1)
+
+        if use_optimized_matmul() and use_optimized_matmul_transposed():
+            self.wo_T = ttnn.transpose(ttnn.squeeze(self.wo), 0, 1)
+            ttnn.deallocate(self.wo)
 
         if not use_paged_kv_cache:
             # vLLM provides its own kv cache
@@ -398,11 +403,13 @@ class Attention(LightweightModule):
         # Use HiFi2 for DRAM-sharded matmuls as they are otherwise flop-bound. Loses 1 bit of activation precision.
         ###
         if use_optimized_matmul():
-            x_T = ttnn.transpose(ttnn.squeeze(x), 0, 1)
-            # xqkv_fused_sharded = ttnn.experimental.optimized_matmul(x, self.wqkv, memory_config=ttnn.L1_MEMORY_CONFIG)
-            xqkv_fused_sharded_T = ttnn.experimental.optimized_matmul(self.wqkv_T, x_T, memory_config=ttnn.L1_MEMORY_CONFIG)
-            xqkv_fused_sharded = ttnn.transpose(xqkv_fused_sharded_T, 0, 1)
-            xqkv_fused_sharded = xqkv_fused_sharded.reshape((1, 1, xqkv_fused_sharded.shape[-2], xqkv_fused_sharded.shape[-1]))
+            if use_optimized_matmul_transposed():
+                x_T = ttnn.transpose(ttnn.squeeze(x), 0, 1)
+                xqkv_fused_sharded_T = ttnn.experimental.optimized_matmul(self.wqkv_T, x_T, memory_config=ttnn.L1_MEMORY_CONFIG)
+                xqkv_fused_sharded = ttnn.transpose(xqkv_fused_sharded_T, 0, 1)
+                xqkv_fused_sharded = xqkv_fused_sharded.reshape((1, 1, xqkv_fused_sharded.shape[-2], xqkv_fused_sharded.shape[-1]))
+            else:
+                xqkv_fused_sharded = ttnn.experimental.optimized_matmul(x, self.wqkv, memory_config=ttnn.L1_MEMORY_CONFIG)
         else:
             xqkv_fused_sharded = ttnn_matmul_2dreuse_forced(
                 x,
@@ -630,11 +637,13 @@ class Attention(LightweightModule):
             # TODO: Fix this once self.TG supports dram-sharded matmuls
             attn_output = ttnn.to_memory_config(attn_output, ttnn.L1_MEMORY_CONFIG)
             if use_optimized_matmul():
-                attn_output_T = ttnn.transpose(ttnn.squeeze(attn_output), 0, 1)
-                # dense_out_sharded = ttnn.experimental.optimized_matmul(attn_output, self.wo, memory_config=ttnn.L1_MEMORY_CONFIG)
-                dense_out_sharded_T = ttnn.experimental.optimized_matmul(self.wo_T, attn_output_T, memory_config=ttnn.L1_MEMORY_CONFIG)
-                dense_out_sharded = ttnn.transpose(dense_out_sharded_T, 0, 1)
-                dense_out_sharded = ttnn.reshape(dense_out_sharded, (1, 1, dense_out_sharded.shape[-2], dense_out_sharded.shape[-1]))
+                if use_optimized_matmul_transposed():
+                    attn_output_T = ttnn.transpose(ttnn.squeeze(attn_output), 0, 1)
+                    dense_out_sharded_T = ttnn.experimental.optimized_matmul(self.wo_T, attn_output_T, memory_config=ttnn.L1_MEMORY_CONFIG)
+                    dense_out_sharded = ttnn.transpose(dense_out_sharded_T, 0, 1)
+                    dense_out_sharded = ttnn.reshape(dense_out_sharded, (1, 1, dense_out_sharded.shape[-2], dense_out_sharded.shape[-1]))
+                else:
+                    dense_out_sharded = ttnn.experimental.optimized_matmul(attn_output, self.wo, memory_config=ttnn.L1_MEMORY_CONFIG)
             else:
                 dense_out_sharded = ttnn_matmul_2dreuse_forced(
                     attn_output,
@@ -701,7 +710,13 @@ class Attention(LightweightModule):
             x_11SH = ttnn.reshape(x_11SH, [1, seq_len // self.MAX_QKV_MM_SEQ_LEN, self.MAX_QKV_MM_SEQ_LEN, -1])
 
         if use_optimized_matmul():
-            xqkv_fused = ttnn.experimental.optimized_matmul(x_11SH, self.wqkv)
+            if use_optimized_matmul_transposed():
+                x_11SH_T = ttnn.transpose(ttnn.squeeze(x_11SH), 0, 1)
+                xqkv_fused_T = ttnn.experimental.optimized_matmul(self.wo_T, x_11SH_T)
+                xqkv_fused = ttnn.transpose(xqkv_fused_T, 0, 1)
+                xqkv_fused = ttnn.reshape(xqkv_fused, (1, 1, xqkv_fused.shape[-2], xqkv_fused.shape[-1]))
+            else:
+                xqkv_fused = ttnn.experimental.optimized_matmul(x_11SH, self.wqkv)
         else:
             xqkv_fused = ttnn.linear(
                 x_11SH,
@@ -897,7 +912,13 @@ class Attention(LightweightModule):
 
 
         if use_optimized_matmul():
-            output_11SH = ttnn.experimental.optimized_matmul(attn_output_11SH, self.wo)
+            if use_optimized_matmul_transposed():
+                attn_output_11SH_T = ttnn.transpose(ttnn.squeeze(attn_output_11SH), 0, 1)
+                output_11SH_T = ttnn.experimental.optimized_matmul(self.wo_T, attn_output_11SH_T)
+                output_11SH = ttnn.transpose(output_11SH_T, 0, 1)
+                output_11SH = ttnn.reshape(output_11SH, (1, 1, output_11SH.shape[-2], output_11SH.shape[-1]))
+            else:
+                output_11SH = ttnn.experimental.optimized_matmul(attn_output_11SH, self.wo)
         else:
             output_11SH = ttnn.linear(
                 attn_output_11SH,

@@ -9,7 +9,7 @@ from models.common.lightweightmodule import LightweightModule
 from models.tt_transformers.tt.ccl import tt_all_reduce
 from models.tt_transformers.tt.common import pad_to_size
 from models.tt_transformers.tt.model_config import OpGroup, TensorGroup
-from models.tt_transformers.tt.common import use_optimized_matmul, ttnn_matmul_2dreuse_forced
+from models.tt_transformers.tt.common import use_optimized_matmul, ttnn_matmul_2dreuse_forced, use_optimized_matmul_transposed
 
 class MLP(LightweightModule):
     def __init__(
@@ -81,9 +81,13 @@ class MLP(LightweightModule):
         self.w2 = as_sharded_tensor("w2_sharded", ff2_dtype, dims=w2_dims)
         self.w3 = as_sharded_tensor("w3_sharded", ff1_3_dtype, dims=w1_dims)
 
-        self.w1_T = ttnn.transpose(self.w1, 0, 1)
-        self.w2_T = ttnn.transpose(self.w2, 0, 1)
-        self.w3_T = ttnn.transpose(self.w3, 0, 1)
+        if use_optimized_matmul() and use_optimized_matmul_transposed():
+            self.w1_T = ttnn.transpose(self.w1, 0, 1)
+            self.w2_T = ttnn.transpose(self.w2, 0, 1)
+            self.w3_T = ttnn.transpose(self.w3, 0, 1)
+            ttnn.deallocate(self.w1)
+            ttnn.deallocate(self.w2)
+            ttnn.deallocate(self.w3)
 
         # Default activation is SILU
         self.activation_type = (
@@ -129,7 +133,7 @@ class MLP(LightweightModule):
         memory_config = ttnn.L1_MEMORY_CONFIG if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG # TTT
 
         if use_optimized_matmul():
-            if mode == "decode":
+            if use_optimized_matmul_transposed():
                 x_T = ttnn.transpose(ttnn.squeeze(x), 0, 1)
                 w1_out_T = ttnn.experimental.optimized_matmul(self.w1_T, x_T, memory_config=memory_config)
                 w3_out_T = ttnn.experimental.optimized_matmul(self.w3_T, x_T, memory_config=memory_config)
@@ -262,7 +266,7 @@ class MLP(LightweightModule):
 
 
         if use_optimized_matmul(): # TTT
-            if mode == "decode":
+            if use_optimized_matmul_transposed():
                 w2_in_T = ttnn.transpose(ttnn.squeeze(w2_in), 0, 1)
                 w2_out_T = ttnn.experimental.optimized_matmul(self.w2_T, w2_in_T, memory_config=memory_config)
                 w2_out = ttnn.transpose(w2_out_T, 0, 1)
