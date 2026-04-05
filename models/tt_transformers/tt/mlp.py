@@ -110,7 +110,6 @@ class MLP(LightweightModule):
         li_ff1_3_compute_kernel_cfg = self.model_config["DECODERS_OPTIMIZATIONS"].get_math_fidelity(
             decoder_id=layer_num, op=OpGroup.LI_FF1_FF3, configuration=self.args
         )
-
         if mode == "decode":  # Sharded config
             if TG:  # TODO: Fix this when TG supports DRAM sharded matmuls
                 pc_1 = self.model_config["FF1_3_TG_PROGCFG"] if self.dim >= 4096 else None
@@ -131,6 +130,8 @@ class MLP(LightweightModule):
         # In decode mode (seqlen <= 32) do DRAM sharded matmuls
         # These use HiFi2; this drops 1 bit of the activations but would be FLOP-bound on 12 cores with HiFi4
         memory_config = ttnn.L1_MEMORY_CONFIG if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG # TTT
+        if x.dtype != ttnn.bfloat8_b:
+            x = ttnn.typecast(x, ttnn.bfloat8_b)
 
         if use_optimized_matmul():
             if mode == "decode":
@@ -148,7 +149,7 @@ class MLP(LightweightModule):
             w1_out = ttnn_matmul_2dreuse_forced(
                 x,
                 self.w1,
-                dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
+                dtype=ttnn.bfloat8_b,
                 core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_1 else None,
                 compute_kernel_config=li_ff1_3_compute_kernel_cfg,
                 memory_config=memory_config,
@@ -157,7 +158,7 @@ class MLP(LightweightModule):
             w3_out = ttnn_matmul_2dreuse_forced(
                 x,
                 self.w3,
-                dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
+                dtype=ttnn.bfloat8_b,
                 core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_3 else None,
                 compute_kernel_config=li_ff1_3_compute_kernel_cfg,
                 memory_config=memory_config,
@@ -263,7 +264,8 @@ class MLP(LightweightModule):
         li_ff2_compute_kernel_cfg = self.model_config["DECODERS_OPTIMIZATIONS"].get_math_fidelity(
             decoder_id=layer_num, op=OpGroup.LI_FF2, configuration=self.args
         )
-
+        if w2_in.dtype != ttnn.bfloat8_b:
+            w2_in = ttnn.typecast(w2_in, ttnn.bfloat8_b)
 
         if use_optimized_matmul(): # TTT
             if mode == "decode":
@@ -278,7 +280,7 @@ class MLP(LightweightModule):
                 w2_in,
                 self.w2,
                 compute_kernel_config=li_ff2_compute_kernel_cfg,
-                dtype=self.args.ccl_dtype if TG else activation_dtype or ttnn.bfloat16,
+                dtype=ttnn.bfloat8_b,
                 memory_config=memory_config,
                 core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_2 else None,
             )
