@@ -6,9 +6,11 @@
 
 #include <cstdint>
 #include <map>
+#include <unordered_map>
 #include <vector>
 
 #include <tt-metalium/constants.hpp>
+#include <tt-metalium/distributed.hpp>
 #include <tt-metalium/host_api.hpp>
 
 #include "optimized_matmul_config.hpp"
@@ -65,23 +67,59 @@ void create_sync_circular_buffer(
     CreateCircularBuffer(program, cores, cb_config);
 }
 
-std::map<std::string, std::string> create_kernel_defines(const OptimizedMatmulVariantSpec& variant_spec) {
+std::map<std::string, std::string> create_kernel_defines(
+    const OptimizedMatmulVariantSpec& variant_spec, const std::optional<uint32_t> physical_chip_id) {
     auto defines = get_optimized_matmul_kernel_defines(variant_spec);
-    defines["TTT_DMVK_SCHEDULE_HEADER"] = get_optimized_matmul_schedule_header_include_path(variant_spec.active_grid);
+    defines["TTT_DMVK_SCHEDULE_HEADER"] =
+        get_optimized_matmul_schedule_header_include_path(variant_spec.active_grid, physical_chip_id);
     return defines;
 }
 
 }  // namespace
 
-OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::cached_program_t
-OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::create(
+OptimizedMatmulDeviceOperation::MultiCoreMeshWorkloadFactory::cached_mesh_workload_t
+OptimizedMatmulDeviceOperation::MultiCoreMeshWorkloadFactory::create_mesh_workload(
     const operation_attributes_t& operation_attributes,
+    const ttnn::MeshCoordinateRangeSet& tensor_coords,
+    const tensor_args_t& tensor_args,
+    tensor_return_value_t& output_tensor) {
+    tt::tt_metal::distributed::MeshWorkload workload;
+    std::unordered_map<ttnn::MeshCoordinateRange, shared_variables_t> shared_variables;
+
+    for (const auto& coord : tensor_coords.coords()) {
+        auto cached_program = create_at(operation_attributes, coord, tensor_args, output_tensor);
+        workload.add_program(ttnn::MeshCoordinateRange(coord), std::move(cached_program.program));
+        shared_variables.emplace(coord, std::move(cached_program.shared_variables));
+    }
+
+    return cached_mesh_workload_t{std::move(workload), std::move(shared_variables)};
+}
+
+OptimizedMatmulDeviceOperation::MultiCoreMeshWorkloadFactory::cached_program_t
+OptimizedMatmulDeviceOperation::MultiCoreMeshWorkloadFactory::create_at(
+    const operation_attributes_t& operation_attributes,
+    const ttnn::MeshCoordinate& mesh_coordinate,
     const tensor_args_t& tensor_args,
     tensor_return_value_t& output_tensor) {
     using namespace tt::tt_metal;
 
     const auto& input_tensor_a = tensor_args.input_tensor_a;
     const auto& input_tensor_b = tensor_args.input_tensor_b;
+    auto* mesh_device = input_tensor_a.device();
+    TT_FATAL(mesh_device != nullptr, "optimized_matmul input tensor must be allocated on a mesh device");
+    auto* target_device = mesh_device->get_device(mesh_coordinate);
+    TT_FATAL(target_device != nullptr, "optimized_matmul could not resolve target device for {}", mesh_coordinate);
+    const auto physical_chip_id = static_cast<uint32_t>(target_device->id());
+    const auto schedule_header_basename =
+        get_optimized_matmul_schedule_header_basename(
+            tt::tt_metal::CoreCoord{operation_attributes.active_grid_x, operation_attributes.active_grid_y},
+            physical_chip_id);
+    log_debug(
+        tt::LogOp,
+        "optimized_matmul schedule selection: mesh_coordinate={}, physical_chip_id={}, header={}",
+        mesh_coordinate,
+        physical_chip_id,
+        schedule_header_basename);
 
     auto* src0_buffer = input_tensor_a.buffer();
     auto* src1_buffer = input_tensor_b.buffer();
@@ -157,7 +195,7 @@ OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::create(
         operation_attributes.output_memory_config.is_dram() ? 1U : 0U,
     };
 
-    const auto kernel_defines = create_kernel_defines(variant_spec);
+    const auto kernel_defines = create_kernel_defines(variant_spec, physical_chip_id);
 
     const auto dmvk_noc0_kernel_id = CreateKernel(
         program,
@@ -251,14 +289,12 @@ OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::create(
         }};
 }
 
-void OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::override_runtime_arguments(
-    cached_program_t& cached_program,
+void OptimizedMatmulDeviceOperation::MultiCoreMeshWorkloadFactory::override_runtime_arguments(
+    cached_mesh_workload_t& cached_workload,
     const operation_attributes_t& operation_attributes,
     const tensor_args_t& tensor_args,
     tensor_return_value_t& output_tensor) {
     using namespace tt::tt_metal;
-
-    auto& program = cached_program.program;
     auto* src0_buffer = tensor_args.input_tensor_a.buffer();
     auto* src1_buffer = tensor_args.input_tensor_b.buffer();
     auto* dst_buffer = output_tensor.buffer();
@@ -269,17 +305,21 @@ void OptimizedMatmulDeviceOperation::MultiCoreProgramFactory::override_runtime_a
         operation_attributes.output_memory_config,
         output_tensor.memory_config());
 
-    for (uint32_t y = 0; y < cached_program.shared_variables.active_grid_y; ++y) {
-        for (uint32_t x = 0; x < cached_program.shared_variables.active_grid_x; ++x) {
-            const CoreCoord core = {x, y};
+    for (auto& [range, program] : cached_workload.workload.get_programs()) {
+        const auto& shared_variables = cached_workload.shared_variables.at(range);
 
-            for (const auto kernel_id : {
-                     cached_program.shared_variables.dmvk_noc0_kernel_id,
-                     cached_program.shared_variables.dmvk_noc1_kernel_id}) {
-                auto& runtime_args = GetRuntimeArgs(program, kernel_id, core);
-                runtime_args[0] = src0_buffer->address();
-                runtime_args[1] = src1_buffer->address();
-                runtime_args[2] = dst_buffer->address();
+        for (uint32_t y = 0; y < shared_variables.active_grid_y; ++y) {
+            for (uint32_t x = 0; x < shared_variables.active_grid_x; ++x) {
+                const CoreCoord core = {x, y};
+
+                for (const auto kernel_id : {
+                         shared_variables.dmvk_noc0_kernel_id,
+                         shared_variables.dmvk_noc1_kernel_id}) {
+                    auto& runtime_args = GetRuntimeArgs(program, kernel_id, core);
+                    runtime_args[0] = src0_buffer->address();
+                    runtime_args[1] = src1_buffer->address();
+                    runtime_args[2] = dst_buffer->address();
+                }
             }
         }
     }

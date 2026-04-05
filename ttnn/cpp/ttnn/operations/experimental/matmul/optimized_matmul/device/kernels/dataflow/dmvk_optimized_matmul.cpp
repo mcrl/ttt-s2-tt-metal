@@ -279,13 +279,14 @@ FORCE_INLINE void A_read_optimized(uint32_t row_bidx, uint32_t k_bidx,
             continue;
         }
 
-        const uint32_t transfer_noc = A_READ_core_noc[y][x][transfer_idx];
+        const uint32_t transfer = A_READ_row_packed_at(y, transfer_idx);
+        const uint32_t transfer_noc = A_READ_row_noc(transfer);
         if (transfer_noc == my_noc) {
             uint64_t noc_addr =
                 A_addrgen.get_noc_addr(
-                    A_READ_core_bank[y][x][transfer_idx],
+                    A_READ_row_bank(transfer),
                     repetition_base_bytes +
-                        A_READ_core_slot_ordinal[y][x][transfer_idx] * A_slot_bytes,
+                        A_READ_row_slot_ordinal(transfer) * A_slot_bytes,
                     transfer_noc);
 #if !SKIP_READ
             noc_async_read(noc_addr, A_l1_ptr + A_idx * A_tile_bytes,
@@ -317,13 +318,14 @@ FORCE_INLINE void B_read_optimized(uint32_t col_bidx, uint32_t k_bidx,
             continue;
         }
 
-        const uint32_t transfer_noc = B_READ_core_noc[y][x][transfer_idx];
+        const uint32_t transfer = B_READ_col_packed_at(x, transfer_idx);
+        const uint32_t transfer_noc = B_READ_col_noc(transfer);
         if (transfer_noc == my_noc) {
             uint64_t noc_addr =
                 B_addrgen.get_noc_addr(
-                    B_READ_core_bank[y][x][transfer_idx],
+                    B_READ_col_bank(transfer),
                     repetition_base_bytes +
-                        B_READ_core_slot_ordinal[y][x][transfer_idx] * B_slot_bytes,
+                        B_READ_col_slot_ordinal(transfer) * B_slot_bytes,
                     transfer_noc);
 #if !SKIP_READ
             noc_async_read(noc_addr, B_l1_ptr + B_idx * B_tile_bytes,
@@ -428,11 +430,12 @@ FORCE_INLINE void C_write_optimized_hardcode(uint32_t row_bidx,
             continue;
         }
         const uint32_t subblock_start = C_write_hardcoded_phase_start(phase);
-        const uint32_t C_phase_bank = C_WRITE_BANK[phase][y][x];
-        const uint32_t C_phase_noc = C_WRITE_NOC[phase][y][x];
+        const uint32_t phase_record = C_WRITE_hardcoded_packed_at(phase, y, x);
+        const uint32_t C_phase_bank = C_WRITE_hardcoded_bank(phase_record);
+        const uint32_t C_phase_noc = C_WRITE_hardcoded_noc(phase_record);
         const uint32_t bank_offset =
             repetition_base_bytes +
-            C_WRITE_HARDCODED_slot_ordinal[phase][y][x] * C_hardcoded_slot_bytes;
+            C_WRITE_hardcoded_slot_ordinal(phase_record) * C_hardcoded_slot_bytes;
 
         dmvk_barrier();
 
@@ -489,55 +492,57 @@ FORCE_INLINE void C_write_optimized_schedule(uint32_t row_bidx,
     for (uint32_t t = 0; t < C_WRITE_SCHED_T; ++t) {
         dmvk_barrier();
 
-        if (next_chunk_idx < C_WRITE_CHUNKS_PER_CORE &&
-            C_WRITE_core_time[y][x][next_chunk_idx] == t) {
-            const uint32_t scheduled_bank = C_WRITE_core_bank[y][x][next_chunk_idx];
-            const uint32_t scheduled_noc = C_WRITE_core_noc[y][x][next_chunk_idx];
-            const uint32_t chunk_subblocks =
-                C_write_chunk_subblocks(next_chunk_idx);
-            const uint32_t subblock_start =
-                C_write_chunk_subblock_start(next_chunk_idx);
-            const uint32_t bank_offset =
-                repetition_base_bytes +
-                C_WRITE_core_slot_ordinal[y][x][next_chunk_idx] * C_slot_bytes;
+        if (next_chunk_idx < C_WRITE_CHUNKS_PER_CORE) {
+            const uint32_t chunk_record = C_WRITE_core_packed_at(y, x, next_chunk_idx);
+            if (C_WRITE_core_time(chunk_record) == t) {
+                const uint32_t scheduled_bank = C_WRITE_core_bank(chunk_record);
+                const uint32_t scheduled_noc = C_WRITE_core_noc(chunk_record);
+                const uint32_t chunk_subblocks =
+                    C_write_chunk_subblocks(next_chunk_idx);
+                const uint32_t subblock_start =
+                    C_write_chunk_subblock_start(next_chunk_idx);
+                const uint32_t bank_offset =
+                    repetition_base_bytes +
+                    C_WRITE_core_slot_ordinal(chunk_record) * C_slot_bytes;
 
-            if (scheduled_noc == my_noc) {
-                for (uint32_t sb = 0; sb < chunk_subblocks; ++sb) {
-                    const uint32_t current_sb = subblock_start + sb;
-                    const uint32_t bh = (current_sb / sb_cols) * SBMt;
-                    const uint32_t bw = (current_sb % sb_cols) * SBNt;
-                    cb_wait_front(C_cb, sb_tiles);
-                    uint32_t l1_read_addr =
-                        C_l1_base_addr + current_sb * sb_tiles * C_tile_bytes;
-                    const uint32_t slot_sb_offset = sb * sb_tiles * C_tile_bytes;
-                    const uint32_t valid_subblock_h =
-                        get_valid_subblock_extent(bh, block_h, SBMt);
-                    const uint32_t valid_subblock_w =
-                        get_valid_subblock_extent(bw, block_w, SBNt);
+                if (scheduled_noc == my_noc) {
+                    for (uint32_t sb = 0; sb < chunk_subblocks; ++sb) {
+                        const uint32_t current_sb = subblock_start + sb;
+                        const uint32_t bh = (current_sb / sb_cols) * SBMt;
+                        const uint32_t bw = (current_sb % sb_cols) * SBNt;
+                        cb_wait_front(C_cb, sb_tiles);
+                        uint32_t l1_read_addr =
+                            C_l1_base_addr + current_sb * sb_tiles * C_tile_bytes;
+                        const uint32_t slot_sb_offset = sb * sb_tiles * C_tile_bytes;
+                        const uint32_t valid_subblock_h =
+                            get_valid_subblock_extent(bh, block_h, SBMt);
+                        const uint32_t valid_subblock_w =
+                            get_valid_subblock_extent(bw, block_w, SBNt);
 
-                    for (uint32_t tile = 0; tile < sb_tiles; ++tile) {
-                        const uint32_t h = tile / SBNt;
-                        const uint32_t w = tile % SBNt;
-                        uint64_t noc_addr =
-                            addrgen.get_noc_addr(scheduled_bank,
-                                                 bank_offset + slot_sb_offset +
-                                                     tile * C_tile_bytes,
-                                                 scheduled_noc);
+                        for (uint32_t tile = 0; tile < sb_tiles; ++tile) {
+                            const uint32_t h = tile / SBNt;
+                            const uint32_t w = tile % SBNt;
+                            uint64_t noc_addr =
+                                addrgen.get_noc_addr(scheduled_bank,
+                                                     bank_offset + slot_sb_offset +
+                                                         tile * C_tile_bytes,
+                                                     scheduled_noc);
 #if !SKIP_WRITE
-                        if (h < valid_subblock_h && w < valid_subblock_w) {
-                            noc_async_write(l1_read_addr, noc_addr, C_tile_bytes,
-                                            scheduled_noc);
-                        }
+                            if (h < valid_subblock_h && w < valid_subblock_w) {
+                                noc_async_write(l1_read_addr, noc_addr, C_tile_bytes,
+                                                scheduled_noc);
+                            }
 #endif
-                        l1_read_addr += C_tile_bytes;
-                    }
+                            l1_read_addr += C_tile_bytes;
+                        }
 
+                        noc_async_write_barrier(scheduled_noc);
+                        cb_pop_front(C_cb, sb_tiles);
+                    }
                     noc_async_write_barrier(scheduled_noc);
-                    cb_pop_front(C_cb, sb_tiles);
                 }
-                noc_async_write_barrier(scheduled_noc);
+                ++next_chunk_idx;
             }
-            ++next_chunk_idx;
         }
 
         dmvk_barrier();

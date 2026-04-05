@@ -195,7 +195,7 @@ void validate_inputs(
 
 OptimizedMatmulDeviceOperation::program_factory_t OptimizedMatmulDeviceOperation::select_program_factory(
     const operation_attributes_t&, const tensor_args_t&) {
-    return MultiCoreProgramFactory{};
+    return MultiCoreMeshWorkloadFactory{};
 }
 
 void OptimizedMatmulDeviceOperation::validate_on_program_cache_miss(
@@ -302,11 +302,23 @@ OptimizedMatmulDeviceOperation::invoke(
     const auto output_memory_config = resolve_optimized_matmul_output_memory_config(memory_config);
     const auto output_dtype = resolve_optimized_matmul_output_dtype(input_tensor_a, dtype);
     const bool use_optimized_write = variant_spec.optimized_write && output_memory_config.is_dram();
+    const tensor_args_t tensor_args{input_tensor_a, input_tensor_b};
+    auto* mesh_device = input_tensor_a.device();
+    TT_FATAL(mesh_device != nullptr, "optimized_matmul requires inputs to be allocated on a mesh device");
+    std::size_t schedule_selection_hash = 0;
+    for (const auto& coord :
+         ttnn::device_operation::mesh_device_operation_utils::extract_tensor_coordinates(tensor_args, mesh_device)) {
+        auto* target_device = mesh_device->get_device(coord);
+        TT_FATAL(target_device != nullptr, "optimized_matmul could not resolve target device for {}", coord);
+        ttsl::hash::hash_combine(schedule_selection_hash, coord);
+        ttsl::hash::hash_combine(schedule_selection_hash, target_device->id());
+    }
     return {
         operation_attributes_t{
             output_memory_config,
             output_dtype,
             math_fidelity,
+            schedule_selection_hash,
             input_tensor_a.dtype(),
             input_tensor_b.dtype(),
             variant_spec.input_a_is_dram,
@@ -318,7 +330,7 @@ OptimizedMatmulDeviceOperation::invoke(
             variant_spec.optimized_write_use_generated_schedule,
             variant_spec.active_grid.x,
             variant_spec.active_grid.y},
-        tensor_args_t{input_tensor_a, input_tensor_b}};
+        tensor_args};
 }
 
 }  // namespace ttnn::operations::experimental::matmul::optimized_matmul

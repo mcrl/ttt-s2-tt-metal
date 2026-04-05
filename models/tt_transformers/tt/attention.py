@@ -722,7 +722,7 @@ class Attention(LightweightModule):
         if use_optimized_matmul():
             if use_optimized_matmul_transposed():
                 x_11SH_T = ttnn.transpose(ttnn.squeeze(x_11SH), 0, 1)
-                xqkv_fused_T = ttnn.experimental.optimized_matmul(self.wo_T, x_11SH_T)
+                xqkv_fused_T = ttnn.experimental.optimized_matmul(self.wqkv_T, x_11SH_T)
                 xqkv_fused = ttnn.transpose(xqkv_fused_T, 0, 1)
                 xqkv_fused = ttnn.reshape(xqkv_fused, (1, 1, xqkv_fused.shape[-2], xqkv_fused.shape[-1]))
             else:

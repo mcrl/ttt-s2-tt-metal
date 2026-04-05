@@ -161,9 +161,10 @@ class LMHead(LightweightModule):
         for idx in range(len(self.output_weights)):
             if use_optimized_matmul():
                 if use_optimized_matmul_transposed():
-                    x_T = ttnn.transpose(x.reshape((x.shape[-2], x.shape[-1])), 0, 1) # [1, 1, B, H] -> [H, B]
+                    x_T = ttnn.transpose(ttnn.squeeze(x), 0, 1) # [1, 1, B, H] -> [H, B]
                     output = ttnn.experimental.optimized_matmul(self.output_weights_T[idx], x_T)
-                    output = ttnn.transpose(output, 0, 1).reshape((1, 1, output.shape[-2], output.shape[-1])) # [V/split, B] -> [1, 1, B, V/split]
+                    output = ttnn.transpose(output, 0, 1)
+                    output = ttnn.reshape(output, (1, 1, output.shape[-2], output.shape[-1])) # [V/split, B] -> [1, 1, B, V/split]
                 else:
                     output = ttnn.experimental.optimized_matmul(x, self.output_weights[idx])
             else:
