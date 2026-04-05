@@ -87,6 +87,8 @@ class Attention(LightweightModule):
 
         self.max_seq_len = configuration.max_seq_len
         self.grid_size = configuration.max_grid_size
+        self.is_p150_family = configuration.is_p150_family
+        self.forced_non_lm_head_core_grid = configuration.forced_non_lm_head_core_grid
 
         self.compute_kernel_config_hifi2 = configuration.compute_kernel_config_hifi2
         self.compute_kernel_config_hifi2_fp16 = configuration.compute_kernel_config_hifi2_fp16
@@ -403,6 +405,7 @@ class Attention(LightweightModule):
         ###
         if x.dtype != ttnn.bfloat8_b:
             x = ttnn.typecast(x, ttnn.bfloat8_b)
+        forced_projection_core_grid = self.forced_non_lm_head_core_grid if self.is_p150_family else None
         if use_optimized_matmul():
             x_T = ttnn.transpose(ttnn.squeeze(x), 0, 1)
             # xqkv_fused_sharded = ttnn.experimental.optimized_matmul(x, self.wqkv, memory_config=ttnn.L1_MEMORY_CONFIG)
@@ -416,6 +419,7 @@ class Attention(LightweightModule):
                 memory_config=ttnn.L1_MEMORY_CONFIG,
                 compute_kernel_config=self.li_qkv_decode_compute_kernel_cfg,
                 dtype=ttnn.bfloat8_b,
+                core_grid=forced_projection_core_grid,
             )
         # FIXME: File bug against dram-sharded matmuls with bias
         if self.wqkv_bias_decode:
@@ -647,7 +651,7 @@ class Attention(LightweightModule):
                 dense_out_sharded = ttnn_matmul_2dreuse_forced(
                     attn_output,
                     self.wo,
-                    core_grid=ttnn.CoreGrid(y=4, x=8) if self.TG else None,
+                    core_grid=ttnn.CoreGrid(y=4, x=8) if self.TG else forced_projection_core_grid,
                     dtype=ttnn.bfloat8_b,
                     memory_config=ttnn.L1_MEMORY_CONFIG,
                     compute_kernel_config=self.li_o_decode_compute_kernel_cfg,

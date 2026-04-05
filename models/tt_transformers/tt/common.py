@@ -33,8 +33,7 @@ def ttnn_matmul_2dreuse_forced(in0, in1, memory_config, dtype, compute_kernel_co
                        dtype=dtype,
                        compute_kernel_config=compute_kernel_config,
                        program_config=program_config,
-                       memory_config=memory_config,
-                       core_grid=core_grid)
+                       memory_config=memory_config)
 
 
 # TTT Tensor debug utility
