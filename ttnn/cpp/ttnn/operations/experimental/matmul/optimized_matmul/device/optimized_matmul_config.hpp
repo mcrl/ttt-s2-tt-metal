@@ -54,7 +54,11 @@ inline OptimizedMatmulConfig resolve_optimized_matmul_config(
     using namespace ttnn::operations::matmul;
 
     const auto program_config = resolve_matmul_2d_reuse_program_config(
-        input_tensor_a, input_tensor_b, std::nullopt, Matmul{.output_dtype = output_dtype}, std::nullopt);
+        input_tensor_a,
+        input_tensor_b,
+        std::nullopt,
+        Matmul{.output_dtype = output_dtype, .user_core_coord = std::make_optional(active_grid)},
+        std::nullopt);
 
     const auto& a_shape = input_tensor_a.padded_shape();
     const auto& b_shape = input_tensor_b.padded_shape();

@@ -29,6 +29,25 @@ OptimizedMatmulVariantSpec get_device_operation_variant_spec_from_attributes(
     };
 }
 
+tt::tt_metal::CoreCoord get_minimum_supported_device_grid(const tt::ARCH arch) {
+    if (arch == tt::ARCH::BLACKHOLE) {
+        return tt::tt_metal::CoreCoord{12, 10};
+    }
+    return tt::tt_metal::CoreCoord{8, 8};
+}
+
+bool is_supported_active_grid_for_arch(const tt::ARCH arch, const tt::tt_metal::CoreCoord& active_grid) {
+    if (arch == tt::ARCH::BLACKHOLE) {
+        return (active_grid.x == 12 && active_grid.y == 10) || (active_grid.x == 12 && active_grid.y == 1) ||
+               (active_grid.x == 1 && active_grid.y == 10);
+    }
+    if (arch == tt::ARCH::WORMHOLE_B0) {
+        return (active_grid.x == 8 && active_grid.y == 8) || (active_grid.x == 8 && active_grid.y == 1) ||
+               (active_grid.x == 1 && active_grid.y == 8);
+    }
+    return false;
+}
+
 ttnn::Shape compute_output_shape(const ttnn::Shape& input_shape_a, const ttnn::Shape& input_shape_b) {
     auto output_shape = input_shape_a;
     output_shape[-1] = input_shape_b[-1];
@@ -149,14 +168,19 @@ void validate_inputs(
         is_supported_optimized_matmul_dtype(operation_attributes.output_dtype),
         "optimized_matmul currently supports output dtype only as BFLOAT16 or BFLOAT8_B, got {}",
         operation_attributes.output_dtype);
+    const auto arch = input_tensor_a.device()->arch();
     TT_FATAL(
-        input_tensor_a.device()->arch() == tt::ARCH::WORMHOLE_B0,
-        "optimized_matmul currently supports only WORMHOLE_B0, got {}",
-        input_tensor_a.device()->arch());
+        arch == tt::ARCH::WORMHOLE_B0 || arch == tt::ARCH::BLACKHOLE,
+        "optimized_matmul currently supports only WORMHOLE_B0 or BLACKHOLE, got {}",
+        arch);
     const auto compute_grid_size = input_tensor_a.device()->compute_with_storage_grid_size();
+    const auto minimum_supported_grid = get_minimum_supported_device_grid(arch);
     TT_FATAL(
-        compute_grid_size.x == 8 && compute_grid_size.y == 8,
-        "optimized_matmul currently supports only compute_with_storage_grid_size=8x8, got {}",
+        compute_grid_size.x >= minimum_supported_grid.x && compute_grid_size.y >= minimum_supported_grid.y,
+        "optimized_matmul currently supports device grids at least {}x{} on {}, got {}",
+        minimum_supported_grid.x,
+        minimum_supported_grid.y,
+        arch,
         compute_grid_size);
 
     const auto& a_logical_shape = input_tensor_a.logical_shape();
@@ -200,6 +224,9 @@ OptimizedMatmulDeviceOperation::program_factory_t OptimizedMatmulDeviceOperation
 
 void OptimizedMatmulDeviceOperation::validate_on_program_cache_miss(
     const operation_attributes_t& operation_attributes, const tensor_args_t& tensor_args) {
+    auto* mesh_device = tensor_args.input_tensor_a.device();
+    TT_FATAL(mesh_device != nullptr, "optimized_matmul requires inputs to be allocated on a mesh device");
+
     TT_FATAL(
         is_supported_optimized_matmul_output_memory_config(operation_attributes.output_memory_config),
         "optimized_matmul currently supports output only as DRAM interleaved or L1 interleaved; got {}",
@@ -216,12 +243,15 @@ void OptimizedMatmulDeviceOperation::validate_on_program_cache_miss(
             operation_attributes.math_fidelity == MathFidelity::HiFi4,
         "optimized_matmul currently supports only LoFi, HiFi2, or HiFi4 math_fidelity, got {}",
         operation_attributes.math_fidelity);
+    const auto active_grid =
+        tt::tt_metal::CoreCoord{operation_attributes.active_grid_x, operation_attributes.active_grid_y};
     TT_FATAL(
-        operation_attributes.active_grid_x > 0 && operation_attributes.active_grid_x <= 8 &&
-            operation_attributes.active_grid_y > 0 && operation_attributes.active_grid_y <= 8,
-        "optimized_matmul currently supports only active grids within 8x8, got {}x{}",
-        operation_attributes.active_grid_x,
-        operation_attributes.active_grid_y);
+        is_supported_active_grid_for_arch(mesh_device->arch(), active_grid),
+        "optimized_matmul currently supports active grids 8x8/8x1/1x8 on WORMHOLE_B0 and 12x10/12x1/1x10 on "
+        "BLACKHOLE, got {}x{} on {}",
+        active_grid.x,
+        active_grid.y,
+        mesh_device->arch());
     validate_inputs(operation_attributes, tensor_args);
     const auto resolved_variant_spec =
         resolve_optimized_matmul_variant_spec(tensor_args.input_tensor_a, tensor_args.input_tensor_b);
@@ -297,14 +327,14 @@ OptimizedMatmulDeviceOperation::invoke(
     std::optional<const DeviceComputeKernelConfig> compute_kernel_config,
     const std::optional<const MemoryConfig>& memory_config,
     const std::optional<const DataType>& dtype) {
+    auto* mesh_device = input_tensor_a.device();
+    TT_FATAL(mesh_device != nullptr, "optimized_matmul requires inputs to be allocated on a mesh device");
     const auto variant_spec = resolve_optimized_matmul_variant_spec(input_tensor_a, input_tensor_b);
     const auto math_fidelity = resolve_optimized_matmul_math_fidelity(input_tensor_a, compute_kernel_config);
     const auto output_memory_config = resolve_optimized_matmul_output_memory_config(memory_config);
     const auto output_dtype = resolve_optimized_matmul_output_dtype(input_tensor_a, dtype);
     const bool use_optimized_write = variant_spec.optimized_write && output_memory_config.is_dram();
     const tensor_args_t tensor_args{input_tensor_a, input_tensor_b};
-    auto* mesh_device = input_tensor_a.device();
-    TT_FATAL(mesh_device != nullptr, "optimized_matmul requires inputs to be allocated on a mesh device");
     std::size_t schedule_selection_hash = 0;
     for (const auto& coord :
          ttnn::device_operation::mesh_device_operation_utils::extract_tensor_coordinates(tensor_args, mesh_device)) {
