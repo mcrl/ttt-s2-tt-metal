@@ -39,6 +39,7 @@ class LMHead(LightweightModule):
         size_per_device = padded_vocab_size // self.num_devices
 
         self.model_config = args.get_model_config()
+        self.forced_core_grid = args.forced_lm_head_core_grid if args.is_p150_family else None
 
         if args.is_galaxy:
             size_per_device = self.padded_vocab_size // self.num_devices
@@ -173,6 +174,7 @@ class LMHead(LightweightModule):
                     # memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
                     memory_config=ttnn.DRAM_MEMORY_CONFIG,  # TTT (jinpyo)
                     dtype=self.args.lm_head_dtype if hasattr(self.args, "lm_head_dtype") else ttnn.bfloat8_b,
+                    core_grid=self.forced_core_grid,
                 )
             outputs.append(
                 output

@@ -702,7 +702,7 @@ def prepare_generator_args(
 )
 @pytest.mark.parametrize(
     "device_params",
-    [{"fabric_config": True, "trace_region_size": 50000000, "num_command_queues": 1, "physical_device_ids": [0]}],
+    [{"fabric_config": True, "trace_region_size": 50000000, "num_command_queues": 1}],
     indirect=True,
 )
 @pytest.mark.parametrize(
@@ -1129,7 +1129,7 @@ def test_demo_text(
                 if len(text) > 100:
                     text = "..." + text[-97:]
                 text = text.replace("\n", " ")
-                logger.debug("[User {}] {}".format(user, text))
+                # logger.debug("[User {}] {}".format(user, text))
 
             iteration += 1
 
