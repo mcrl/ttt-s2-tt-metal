@@ -222,6 +222,18 @@ namespace wormhole_b0_1x8_0x12_schedule {
 #include "kernels/dataflow/schedules/wormhole_b0_1x8_0x12_schedule.hpp"
 }  // namespace wormhole_b0_1x8_0x12_schedule
 
+namespace blackhole_12x10_schedule {
+#include "kernels/dataflow/schedules/blackhole_12x10_schedule.hpp"
+}  // namespace blackhole_12x10_schedule
+
+namespace blackhole_12x1_schedule {
+#include "kernels/dataflow/schedules/blackhole_12x1_schedule.hpp"
+}  // namespace blackhole_12x1_schedule
+
+namespace blackhole_1x10_schedule {
+#include "kernels/dataflow/schedules/blackhole_1x10_schedule.hpp"
+}  // namespace blackhole_1x10_schedule
+
 #ifdef TTNN_OPTIMIZED_MATMUL_SCHEDULE_FORCE_INLINE_DEFINED
 #undef FORCE_INLINE
 #undef TTNN_OPTIMIZED_MATMUL_SCHEDULE_FORCE_INLINE_DEFINED
@@ -266,6 +278,9 @@ constexpr bool operator==(
 constexpr auto wormhole_b0_8x8_metadata = TTNN_OPTIMIZED_MATMUL_SCHEDULE_METADATA(wormhole_b0_8x8_schedule);
 constexpr auto wormhole_b0_8x1_metadata = TTNN_OPTIMIZED_MATMUL_SCHEDULE_METADATA(wormhole_b0_8x1_schedule);
 constexpr auto wormhole_b0_1x8_metadata = TTNN_OPTIMIZED_MATMUL_SCHEDULE_METADATA(wormhole_b0_1x8_schedule);
+constexpr auto blackhole_12x10_metadata = TTNN_OPTIMIZED_MATMUL_SCHEDULE_METADATA(blackhole_12x10_schedule);
+constexpr auto blackhole_12x1_metadata = TTNN_OPTIMIZED_MATMUL_SCHEDULE_METADATA(blackhole_12x1_schedule);
+constexpr auto blackhole_1x10_metadata = TTNN_OPTIMIZED_MATMUL_SCHEDULE_METADATA(blackhole_1x10_schedule);
 
 static_assert(
     wormhole_b0_8x8_metadata == TTNN_OPTIMIZED_MATMUL_SCHEDULE_METADATA(wormhole_b0_8x8_0_schedule),
@@ -478,6 +493,18 @@ inline OptimizedMatmulScheduleMetadata get_optimized_matmul_schedule_metadata(
         return wormhole_b0_1x8_metadata;
     }
 
+    if (active_grid.x == 12 && active_grid.y == 10) {
+        return blackhole_12x10_metadata;
+    }
+
+    if (active_grid.x == 12 && active_grid.y == 1) {
+        return blackhole_12x1_metadata;
+    }
+
+    if (active_grid.x == 1 && active_grid.y == 10) {
+        return blackhole_1x10_metadata;
+    }
+
     TT_THROW(
         "optimized_matmul does not have a vendored schedule for active grid {}x{}",
         active_grid.x,
@@ -513,6 +540,15 @@ inline std::string get_optimized_matmul_schedule_header_basename(
             return "wormhole_b0_1x8_" + std::to_string(physical_chip_id.value()) + "_schedule.hpp";
         }
         return "wormhole_b0_1x8_schedule.hpp";
+    }
+    if (active_grid.x == 12 && active_grid.y == 10) {
+        return "blackhole_12x10_schedule.hpp";
+    }
+    if (active_grid.x == 12 && active_grid.y == 1) {
+        return "blackhole_12x1_schedule.hpp";
+    }
+    if (active_grid.x == 1 && active_grid.y == 10) {
+        return "blackhole_1x10_schedule.hpp";
     }
 
     TT_THROW(

@@ -64,7 +64,7 @@ inline OptimizedMatmulConfig resolve_optimized_matmul_config(
         virtual_input_tensor_a,
         virtual_input_tensor_b,
         std::nullopt,
-        Matmul{.output_dtype = output_dtype},
+        Matmul{.output_dtype = output_dtype, .user_core_coord = std::make_optional(active_grid)},
         std::nullopt);
 
     const auto& a_shape = effective_shapes.a_padded_shape;

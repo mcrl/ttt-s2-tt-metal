@@ -19,13 +19,12 @@ export B=${B:-32}
 export S=${S:-1024}
 export MAX_S=${MAX_S:-1500}
 export GEN_TOKENS=${GEN_TOKENS:-128}
+export MODE=${MODE:-prefill}
+export PROFILE=${PROFILE:-0}
 
 export FIX_PREFILL_LEN=$S
-export MODE=${MODE:-prefill}
 
 export TT_VISIBLE_DEVICES=${TT_VISIBLE_DEVICES:-0,1,2,3}
-
-export PROFILE=${PROFILE:-0}
 
 rm -rf ~/.cache/tt-metal-cache
 

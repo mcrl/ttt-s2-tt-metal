@@ -178,6 +178,8 @@ inline OptimizedMatmulVariantSpec resolve_optimized_matmul_variant_spec(
         resolve_optimized_matmul_effective_shapes(input_tensor_a, input_tensor_b, matmul_shape_override);
     const auto& a_shape = effective_shapes.a_padded_shape;
     const auto& b_shape = effective_shapes.b_padded_shape;
+    auto* mesh_device = input_tensor_a.device();
+    TT_FATAL(mesh_device != nullptr, "optimized_matmul requires input A to be allocated on a mesh device");
     const auto mt = a_shape[-2] / tt::constants::TILE_HEIGHT;
     const auto nt = b_shape[-1] / tt::constants::TILE_WIDTH;
     const auto kt = a_shape[-1] / tt::constants::TILE_WIDTH;
@@ -192,15 +194,24 @@ inline OptimizedMatmulVariantSpec resolve_optimized_matmul_variant_spec(
     const bool input_b_is_interleaved_l1 = is_interleaved_buffer_type(input_tensor_b, BufferType::L1);
 
     auto active_grid = tt::tt_metal::CoreCoord{8, 8};
+    auto row_only_active_grid = tt::tt_metal::CoreCoord{8, 1};
+    auto col_only_active_grid = tt::tt_metal::CoreCoord{1, 8};
     bool optimized_write_use_generated_schedule = false;
+
+    if (mesh_device->arch() == tt::ARCH::BLACKHOLE) {
+        // Blackhole experiments in this fork use a fixed 12x10 active grid.
+        active_grid = tt::tt_metal::CoreCoord{12, 10};
+        row_only_active_grid = tt::tt_metal::CoreCoord{12, 1};
+        col_only_active_grid = tt::tt_metal::CoreCoord{1, 10};
+    }
 
     // When both Mt and Nt are 1, prefer the Mt==1 rule.
     if (mt == 1) {
         optimized_write_use_generated_schedule = true;
-        active_grid = tt::tt_metal::CoreCoord{8, 1};
+        active_grid = row_only_active_grid;
     } else if (nt == 1) {
         optimized_write_use_generated_schedule = true;
-        active_grid = tt::tt_metal::CoreCoord{1, 8};
+        active_grid = col_only_active_grid;
     }
 
     return OptimizedMatmulVariantSpec{
