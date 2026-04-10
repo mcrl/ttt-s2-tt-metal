@@ -10,6 +10,7 @@ import ttnn
 from models.common.lightweightmodule import LightweightModule
 from models.tt_transformers.tt.ccl import tt_all_reduce
 from models.tt_transformers.tt.common import (
+    make_ttt_compute_kernel_config,
     use_optimized_matmul,
     ttnn_matmul_2dreuse_forced,
     use_optimized_matmul_transposed,
@@ -122,12 +123,7 @@ class LMHead(LightweightModule):
                     )
                 self.output_weights.append(output_weight)
 
-        self.compute_kernel_config = ttnn.WormholeComputeKernelConfig(
-            math_fidelity=ttnn.MathFidelity.HiFi2,
-            math_approx_mode=False,
-            fp32_dest_acc_en=False,
-            packer_l1_acc=True,
-        )
+        self.compute_kernel_config = make_ttt_compute_kernel_config()
         if args.is_galaxy:
             self.program_configs = [
                 (
@@ -167,9 +163,12 @@ class LMHead(LightweightModule):
                             self.output_weights[idx].shape[-2],
                         ),
                         output_shape_override=(1, 1, x.shape[-2], self.output_weights[idx].shape[-1]),
+                        compute_kernel_config=self.compute_kernel_config,
+                        dtype=ttnn.bfloat16
                     )
                 else:
-                    output = ttnn.experimental.optimized_matmul(x, self.output_weights[idx])
+                    output = ttnn.experimental.optimized_matmul(x, self.output_weights[idx], 
+                                    compute_kernel_config=self.compute_kernel_config, dtype=ttnn.bfloat16)
             else:
                 output = ttnn_matmul_2dreuse_forced(
                     x,
@@ -177,7 +176,7 @@ class LMHead(LightweightModule):
                     compute_kernel_config=self.compute_kernel_config,
                     # memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
                     memory_config=ttnn.DRAM_MEMORY_CONFIG,  # TTT (jinpyo)
-                    dtype=self.args.lm_head_dtype if hasattr(self.args, "lm_head_dtype") else ttnn.bfloat8_b,
+                    dtype=ttnn.bfloat16,
                     core_grid=self.forced_core_grid,
                 )
             outputs.append(

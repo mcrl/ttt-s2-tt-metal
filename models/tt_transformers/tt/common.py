@@ -23,6 +23,26 @@ def use_optimized_matmul():
 def use_optimized_matmul_transposed():
     return os.getenv("TTT_OPTIMIZED_MATMUL_TRANSPOSED", "1") == "1"
 
+def get_ttt_math_fidelity():
+    fidelity_name = os.getenv("TTT_MATH_FIDELITY", "HiFi2").strip().lower()
+    fidelity_map = {
+        "lofi": ttnn.MathFidelity.LoFi,
+        "hifi2": ttnn.MathFidelity.HiFi2,
+    }
+    if fidelity_name not in fidelity_map:
+        raise ValueError(
+            f"Unsupported TTT_MATH_FIDELITY={fidelity_name!r}. Supported values are LoFi and HiFi2."
+        )
+    return fidelity_map[fidelity_name]
+
+def make_ttt_compute_kernel_config():
+    return ttnn.WormholeComputeKernelConfig(
+        math_fidelity=get_ttt_math_fidelity(),
+        math_approx_mode=False,
+        fp32_dest_acc_en=False,
+        packer_l1_acc=True,
+    )
+
 def ttnn_matmul_2dreuse_forced(in0, in1, memory_config, compute_kernel_config, dtype=None, core_grid=None):
     program_config = ttnn.resolve_matmul_2d_reuse_program_config(
         in0,

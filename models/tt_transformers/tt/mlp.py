@@ -10,6 +10,7 @@ from models.tt_transformers.tt.ccl import tt_all_reduce
 from models.tt_transformers.tt.common import pad_to_size
 from models.tt_transformers.tt.model_config import OpGroup, TensorGroup
 from models.tt_transformers.tt.common import (
+    make_ttt_compute_kernel_config,
     use_optimized_matmul,
     ttnn_matmul_2dreuse_forced,
     use_optimized_matmul_transposed,
@@ -115,9 +116,7 @@ class MLP(LightweightModule):
             decoder_id=layer_num, tensor=TensorGroup.ACTIVATION
         )
         forced_core_grid = self.args.forced_core_grid if self.args.is_p150_family else None
-        li_ff1_3_compute_kernel_cfg = self.model_config["DECODERS_OPTIMIZATIONS"].get_math_fidelity(
-            decoder_id=layer_num, op=OpGroup.LI_FF1_FF3, configuration=self.args
-        )
+        li_ff1_3_compute_kernel_cfg = make_ttt_compute_kernel_config()
         if mode == "decode":  # Sharded config
             if TG:  # TODO: Fix this when TG supports DRAM sharded matmuls
                 pc_1 = self.model_config["FF1_3_TG_PROGCFG"] if self.dim >= 4096 else None
@@ -128,9 +127,9 @@ class MLP(LightweightModule):
                 pc_2 = self.model_config["DECODE_MLP_W2_PRG_CONFIG"]
                 pc_3 = self.model_config["DECODE_MLP_W1_W3_PRG_CONFIG"]
         else:  # Update the program configs based for prefill
-            if seq_len >= self.args.prefill_len_cutoff:  # 512 if Blackhole, 1024 if Wormhole
+            # if seq_len >= self.args.prefill_len_cutoff:  # 512 if Blackhole, 1024 if Wormhole
                 # Reshape input to to fit on device and parallelize computation
-                x = ttnn.reshape(x, [1, seq_len // self.args.prefill_len_cutoff, self.args.prefill_len_cutoff, -1])
+                # x = ttnn.reshape(x, [1, seq_len // self.args.prefill_len_cutoff, self.args.prefill_len_cutoff, -1])
             pc_1 = self.model_config["PREFILL_MLP_W1_W3_PRG_CONFIG"](seq_len)
             pc_2 = self.model_config["PREFILL_MLP_W2_PRG_CONFIG"](seq_len)
             pc_3 = self.model_config["PREFILL_MLP_W1_W3_PRG_CONFIG"](seq_len)
@@ -147,6 +146,8 @@ class MLP(LightweightModule):
                     matmul_shape_override=(self.w1.shape[-1], x.shape[-2], self.w1.shape[-2]),
                     output_shape_override=(1, 1, x.shape[-2], self.w1.shape[-1]),
                     memory_config=memory_config,
+                    compute_kernel_config=li_ff1_3_compute_kernel_cfg,
+                    dtype=ttnn.bfloat16,
                 )
                 w3_out = ttnn.experimental.optimized_matmul(
                     self.w3_T,
@@ -154,10 +155,18 @@ class MLP(LightweightModule):
                     matmul_shape_override=(self.w3.shape[-1], x.shape[-2], self.w3.shape[-2]),
                     output_shape_override=(1, 1, x.shape[-2], self.w3.shape[-1]),
                     memory_config=memory_config,
+                    compute_kernel_config=li_ff1_3_compute_kernel_cfg,
+                    dtype=ttnn.bfloat16,
                 )
             else:
-                w1_out = ttnn.experimental.optimized_matmul(x, self.w1, memory_config=memory_config)
-                w3_out = ttnn.experimental.optimized_matmul(x, self.w3, memory_config=memory_config)
+                w1_out = ttnn.experimental.optimized_matmul(x, self.w1,
+                            memory_config=memory_config,
+                            compute_kernel_config=li_ff1_3_compute_kernel_cfg,
+                            dtype=ttnn.bfloat16,)
+                w3_out = ttnn.experimental.optimized_matmul(x, self.w3,
+                            memory_config=memory_config,
+                            compute_kernel_config=li_ff1_3_compute_kernel_cfg,
+                            dtype=ttnn.bfloat16,)
         else:
             w1_out = ttnn_matmul_2dreuse_forced(
                 x,
@@ -243,7 +252,8 @@ class MLP(LightweightModule):
             w1_out,
             w3_out,
             input_tensor_a_activations=[self.activation_type],
-            dtype=activation_dtype or ttnn.bfloat8_b,
+            # dtype=activation_dtype or ttnn.bfloat8_b,
+            dtype=ttnn.bfloat16,
             memory_config=w1_out.memory_config(),
         )
 
@@ -274,24 +284,27 @@ class MLP(LightweightModule):
             if mode == "decode":
                 w2_in = ttnn.to_memory_config(w2_in, ttnn.L1_MEMORY_CONFIG)
 
-        li_ff2_compute_kernel_cfg = self.model_config["DECODERS_OPTIMIZATIONS"].get_math_fidelity(
-            decoder_id=layer_num, op=OpGroup.LI_FF2, configuration=self.args
-        )
+        li_ff2_compute_kernel_cfg = make_ttt_compute_kernel_config()
 
         if use_optimized_matmul(): # TTT
             if use_optimized_matmul_transposed():
-                w2_in_T = ttnn.transpose(ttnn.squeeze(w2_in), 0, 1)
-                w2_out_T = ttnn.experimental.optimized_matmul(self.w2_T, w2_in_T, memory_config=memory_config)
-                w2_out = ttnn.transpose(w2_out_T, 0, 1)
-                w2_out = w2_out.reshape((1, 1, w2_out.shape[-2], w2_out.shape[-1]))
+                w2_out = ttnn.experimental.optimized_matmul(
+                    self.w2_T,
+                    w2_in,
+                    matmul_shape_override=(self.w2.shape[-1], w2_in.shape[-2], self.w2.shape[-2]),
+                    output_shape_override=(1, 1, w2_in.shape[-2], self.w2.shape[-1]),
+                    memory_config=memory_config,
+                    dtype=ttnn.bfloat16,
+                    compute_kernel_config=li_ff2_compute_kernel_cfg,
+                )
             else:
-                w2_out = ttnn.experimental.optimized_matmul(w2_in, self.w2, memory_config=memory_config)
+                w2_out = ttnn.experimental.optimized_matmul(w2_in, self.w2, memory_config=memory_config, dtype=ttnn.bfloat16, compute_kernel_config=li_ff2_compute_kernel_cfg,)
         else:
             w2_out = ttnn_matmul_2dreuse_forced(
                 w2_in,
                 self.w2,
                 compute_kernel_config=li_ff2_compute_kernel_cfg,
-                dtype=self.args.ccl_dtype if TG else activation_dtype or ttnn.bfloat16,
+                dtype=ttnn.bfloat16,
                 memory_config=memory_config,
                 core_grid=forced_core_grid,
             )

@@ -424,6 +424,14 @@ OptimizedMatmulDeviceOperation::tensor_return_value_t OptimizedMatmulDeviceOpera
         return create_device_tensor(output_spec, tensor_args.input_tensor_a.device());
     }
 
+    if (operation_attributes.has_matmul_shape_override && operation_attributes.has_output_shape_override) {
+        return create_raw_optim_output_tensor(
+            output_spec,
+            tensor_args.input_tensor_a.device(),
+            static_cast<uint32_t>(output_spec.compute_page_size_bytes()),
+            static_cast<uint32_t>(output_spec.compute_packed_buffer_size_bytes()));
+    }
+
     const auto resolved_config = resolve_optimized_matmul_config(
         tensor_args.input_tensor_a,
         tensor_args.input_tensor_b,

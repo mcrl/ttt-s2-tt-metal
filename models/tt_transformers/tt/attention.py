@@ -12,6 +12,7 @@ from models.common.rmsnorm import RMSNorm
 from models.tt_transformers.tt.ccl import tt_all_gather, tt_all_reduce
 from models.tt_transformers.tt.model_config import OpGroup, TensorGroup
 from models.tt_transformers.tt.common import (
+    make_ttt_compute_kernel_config,
     use_optimized_matmul,
     ttnn_matmul_2dreuse_forced,
     use_optimized_matmul_transposed,
@@ -120,24 +121,16 @@ class Attention(LightweightModule):
         self.kv_cache_dtype = self.model_config["DECODERS_OPTIMIZATIONS"].get_tensor_dtype(
             decoder_id=layer_num, tensor=TensorGroup.KV_CACHE
         )
-        self.li_qkv_decode_compute_kernel_cfg = self.model_config["DECODERS_OPTIMIZATIONS"].get_math_fidelity(
-            decoder_id=layer_num, op=OpGroup.LI_QKV_DECODE, configuration=configuration
-        )
+        self.li_qkv_decode_compute_kernel_cfg = make_ttt_compute_kernel_config()
         self.sdpa_decode_compute_kernel_cfg = self.model_config["DECODERS_OPTIMIZATIONS"].get_math_fidelity(
             decoder_id=layer_num, op=OpGroup.SDPA_DECODE, configuration=configuration
         )
-        self.li_o_decode_compute_kernel_cfg = self.model_config["DECODERS_OPTIMIZATIONS"].get_math_fidelity(
-            decoder_id=layer_num, op=OpGroup.LI_O_DECODE, configuration=configuration
-        )
+        self.li_o_decode_compute_kernel_cfg = make_ttt_compute_kernel_config()
         self.sdpa_prefill_compute_kernel_cfg = self.model_config["DECODERS_OPTIMIZATIONS"].get_math_fidelity(
             decoder_id=layer_num, op=OpGroup.SDPA_PREFILL, configuration=configuration
         )
-        self.li_qkv_prefill_compute_kernel_cfg = self.model_config["DECODERS_OPTIMIZATIONS"].get_math_fidelity(
-            decoder_id=layer_num, op=OpGroup.LI_QKV_PREFILL, configuration=configuration
-        )
-        self.li_o_prefill_compute_kernel_cfg = self.model_config["DECODERS_OPTIMIZATIONS"].get_math_fidelity(
-            decoder_id=layer_num, op=OpGroup.LI_O_PREFILL, configuration=configuration
-        )
+        self.li_qkv_prefill_compute_kernel_cfg = make_ttt_compute_kernel_config()
+        self.li_o_prefill_compute_kernel_cfg = make_ttt_compute_kernel_config()
 
         layer_name = configuration.get_state_dict_prefix(self.__class__.__name__, layer_num)
         if configuration.dummy_weights or (weight_cache_path is None):
@@ -422,10 +415,12 @@ class Attention(LightweightModule):
                     matmul_shape_override=(self.wqkv.shape[-1], x.shape[-2], self.wqkv.shape[-2]),
                     output_shape_override=(1, 1, x.shape[-2], self.wqkv.shape[-1]),
                     memory_config=ttnn.L1_MEMORY_CONFIG,
+                    compute_kernel_config=self.li_qkv_decode_compute_kernel_cfg,
                 )
             else:
                 xqkv_fused_sharded = ttnn.experimental.optimized_matmul(
-                    x, self.wqkv, memory_config=ttnn.L1_MEMORY_CONFIG
+                    x, self.wqkv, memory_config=ttnn.L1_MEMORY_CONFIG,
+                    compute_kernel_config=self.li_qkv_decode_compute_kernel_cfg,
                 )
         else:
             xqkv_fused_sharded = ttnn_matmul_2dreuse_forced(
@@ -656,17 +651,20 @@ class Attention(LightweightModule):
             attn_output = ttnn.to_memory_config(attn_output, ttnn.L1_MEMORY_CONFIG)
             if use_optimized_matmul():
                 if use_optimized_matmul_transposed():
-                    attn_output_T = ttnn.transpose(ttnn.squeeze(attn_output), 0, 1)
-                    dense_out_sharded_T = ttnn.experimental.optimized_matmul(
-                        self.wo_T, attn_output_T, memory_config=ttnn.L1_MEMORY_CONFIG
-                    )
-                    dense_out_sharded = ttnn.transpose(dense_out_sharded_T, 0, 1)
-                    dense_out_sharded = ttnn.reshape(
-                        dense_out_sharded, (1, 1, dense_out_sharded.shape[-2], dense_out_sharded.shape[-1])
+                    dense_out_sharded = ttnn.experimental.optimized_matmul(
+                        self.wo_T,
+                        attn_output,
+                        matmul_shape_override=(self.wo.shape[-1], attn_output.shape[-2], self.wo.shape[-2]),
+                        output_shape_override=(1, 1, attn_output.shape[-2], self.wo.shape[-1]),
+                        memory_config=ttnn.L1_MEMORY_CONFIG,
+                        compute_kernel_config=self.li_o_decode_compute_kernel_cfg,
                     )
                 else:
                     dense_out_sharded = ttnn.experimental.optimized_matmul(
-                        attn_output, self.wo, memory_config=ttnn.L1_MEMORY_CONFIG
+                        attn_output,
+                        self.wo,
+                        memory_config=ttnn.L1_MEMORY_CONFIG,
+                        compute_kernel_config=self.li_o_decode_compute_kernel_cfg,
                     )
             else:
                 dense_out_sharded = ttnn_matmul_2dreuse_forced(
@@ -725,8 +723,8 @@ class Attention(LightweightModule):
         ###
         # QKV matmuls
         ###
-        if x_11SH.dtype != ttnn.bfloat8_b:
-            x_11SH = ttnn.typecast(x_11SH, ttnn.bfloat8_b)
+        # if x_11SH.dtype != ttnn.bfloat8_b:
+        #     x_11SH = ttnn.typecast(x_11SH, ttnn.bfloat8_b)
 
         # reshaping long sequence to matmul fit on device
         if seq_len > self.MAX_QKV_MM_SEQ_LEN:
@@ -741,9 +739,11 @@ class Attention(LightweightModule):
                     x_11SH,
                     matmul_shape_override=(self.wqkv.shape[-1], x_11SH.shape[-2], self.wqkv.shape[-2]),
                     output_shape_override=(1, 1, x_11SH.shape[-2], self.wqkv.shape[-1]),
+                    compute_kernel_config=self.li_qkv_prefill_compute_kernel_cfg,
                 )
             else:
-                xqkv_fused = ttnn.experimental.optimized_matmul(x_11SH, self.wqkv)
+                xqkv_fused = ttnn.experimental.optimized_matmul(x_11SH, self.wqkv, 
+                                        compute_kernel_config=self.li_qkv_prefill_compute_kernel_cfg)
         else:
             """
             xqkv_fused = ttnn.linear(
@@ -885,7 +885,8 @@ class Attention(LightweightModule):
             ttnn.deallocate(v_fill)
 
         # SDPA
-        q_heads_1QSD_8b = ttnn.typecast(q_heads_1QSD, dtype=self.activation_dtype or ttnn.bfloat8_b)
+        # q_heads_1QSD_8b = ttnn.typecast(q_heads_1QSD, dtype=self.activation_dtype or ttnn.bfloat8_b)
+        q_heads_1QSD_8b = ttnn.typecast(q_heads_1QSD, dtype=ttnn.bfloat16)
         ttnn.deallocate(q_heads_1QSD)
 
         if chunk_start_idx is not None:
@@ -950,34 +951,29 @@ class Attention(LightweightModule):
 
         if use_optimized_matmul():
             if use_optimized_matmul_transposed():
-                attn_output_11SH_T = ttnn.transpose(ttnn.squeeze(attn_output_11SH), 0, 1)
-                output_11SH_T = ttnn.experimental.optimized_matmul(self.wo_T, attn_output_11SH_T)
-                output_11SH = ttnn.transpose(output_11SH_T, 0, 1)
-                output_11SH = ttnn.reshape(output_11SH, (1, 1, output_11SH.shape[-2], output_11SH.shape[-1]))
+                output_11SH = ttnn.experimental.optimized_matmul(
+                    self.wo_T,
+                    attn_output_11SH,
+                    matmul_shape_override=(self.wo.shape[-1], attn_output_11SH.shape[-2], self.wo.shape[-2]),
+                    output_shape_override=(1, 1, attn_output_11SH.shape[-2], self.wo.shape[-1]),
+                    compute_kernel_config=self.li_o_prefill_compute_kernel_cfg,
+                    dtype=ttnn.bfloat16,
+                )
             else:
-                output_11SH = ttnn.experimental.optimized_matmul(attn_output_11SH, self.wo)
+                output_11SH = ttnn.experimental.optimized_matmul(attn_output_11SH, self.wo,
+                                        compute_kernel_config=self.li_o_prefill_compute_kernel_cfg, dtype=ttnn.bfloat16)
         else:
-            """
-            output_11SH = ttnn.linear(
-                attn_output_11SH,
-                self.wo,
-                compute_kernel_config=self.li_o_prefill_compute_kernel_cfg,
-                dtype=ttnn.bfloat8_b,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                program_config=self.model_config["WO_PREFILL_PROGCFG"](seq_len),
-            )
-            """
             output_11SH = ttnn_matmul_2dreuse_forced(
                 attn_output_11SH,
                 self.wo,
                 compute_kernel_config=self.li_o_prefill_compute_kernel_cfg,
-                dtype=self.activation_dtype or ttnn.bfloat8_b,
+                dtype=ttnn.bfloat16,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 core_grid=self.forced_core_grid if self.is_p150_family else None,
             )
 
-        if seq_len > 1024:
-            output_11SH = ttnn.reshape(output_11SH, [1, 1, seq_len, -1])
+        # if seq_len > 1024:
+        #     output_11SH = ttnn.reshape(output_11SH, [1, 1, seq_len, -1])
         ttnn.deallocate(attn_output_11SH)
 
         # Reduce-scatter
