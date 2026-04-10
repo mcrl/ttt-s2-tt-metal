@@ -83,6 +83,7 @@ class Generator:
         self.trace_id_prefill = defaultdict(lambda: None)
         self.trace_inputs_prefill = defaultdict(lambda: None)
         self.trace_output_prefill = defaultdict(lambda: None)
+        self.trace_model_id_prefill = {}
         self.trace_ids_decode = defaultdict(lambda: None)  # {device_sampling_bool: {device_id: trace_id}}
         self.trace_inputs_decode = defaultdict(lambda: None)
         self.trace_output_decode = defaultdict(lambda: None)
@@ -214,6 +215,7 @@ class Generator:
             self.trace_id_prefill[trace_key] = trace_id
             self.trace_inputs_prefill[trace_key] = device_inputs
             self.trace_output_prefill[trace_key] = tt_out_trace
+            self.trace_model_id_prefill[trace_key] = model_id
 
         tt_out_trace = self._prefill_forward_trace(
             self.trace_id_prefill[trace_key],
@@ -1722,9 +1724,38 @@ class Generator:
                 page_table = torch.cat([page_table, padding], dim=1)
         return page_table[:, :num_blocks]
 
+    def release_prefill_traces(self):
+        synchronized_devices = set()
+        for trace_key, trace_id in list(self.trace_id_prefill.items()):
+            if trace_id is None:
+                continue
+
+            model_id = self.trace_model_id_prefill.get(trace_key)
+            if model_id is None:
+                continue
+
+            mesh_device = self.model_args[model_id].mesh_device
+            mesh_device_id = id(mesh_device)
+            if mesh_device_id not in synchronized_devices:
+                ttnn.synchronize_device(mesh_device)
+                synchronized_devices.add(mesh_device_id)
+
+            ttnn.release_trace(mesh_device, trace_id)
+
+        self.trace_id_prefill = defaultdict(lambda: None)
+        self.trace_inputs_prefill = defaultdict(lambda: None)
+        self.trace_output_prefill = defaultdict(lambda: None)
+        self.trace_model_id_prefill = {}
+        self.prefill_traces_warmup = False
+
     ## Destructor
 
     def __del__(self):
+        try:
+            self.release_prefill_traces()
+        except Exception:
+            pass
+
         # Workaround for issue #19052
         if self.data_parallel > 1:
             for m in self.model:
