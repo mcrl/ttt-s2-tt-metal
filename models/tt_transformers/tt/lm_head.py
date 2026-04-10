@@ -9,7 +9,11 @@ import torch
 import ttnn
 from models.common.lightweightmodule import LightweightModule
 from models.tt_transformers.tt.ccl import tt_all_reduce
-from models.tt_transformers.tt.common import use_optimized_matmul, ttnn_matmul_2dreuse_forced, use_optimized_matmul_transposed
+from models.tt_transformers.tt.common import (
+    use_optimized_matmul,
+    ttnn_matmul_2dreuse_forced,
+    use_optimized_matmul_transposed,
+)
 
 
 class LMHead(LightweightModule):
@@ -63,7 +67,6 @@ class LMHead(LightweightModule):
             )
 
         self.output_weights = []
-        self.output_weights_T = []
         if args.is_galaxy:
             cache_file_name = (
                 None if args.dummy_weights else weight_cache_path / f"output_lm_head_{num_splits}_split_shard_0"
@@ -87,9 +90,6 @@ class LMHead(LightweightModule):
                     cache_file_name=cache_file_name,
                 )
             self.output_weights.append(output_weight)
-            if use_optimized_matmul() and use_optimized_matmul_transposed():
-                self.output_weights_T.append(ttnn.transpose(output_weight, 0, 1))
-                ttnn.deallocate(output_weight)
         else:
             for i, split_size in enumerate(split_sizes):
                 # Create a list to store the split tensors for each device
@@ -121,9 +121,6 @@ class LMHead(LightweightModule):
                         cache_file_name=cache_file_name,
                     )
                 self.output_weights.append(output_weight)
-                if use_optimized_matmul() and use_optimized_matmul_transposed():
-                    self.output_weights_T.append(ttnn.transpose(output_weight, 0, 1))
-                    ttnn.deallocate(output_weight)
 
         self.compute_kernel_config = ttnn.WormholeComputeKernelConfig(
             math_fidelity=ttnn.MathFidelity.HiFi2,
@@ -161,10 +158,16 @@ class LMHead(LightweightModule):
         for idx in range(len(self.output_weights)):
             if use_optimized_matmul():
                 if use_optimized_matmul_transposed():
-                    x_T = ttnn.transpose(ttnn.squeeze(x), 0, 1) # [1, 1, B, H] -> [H, B]
-                    output = ttnn.experimental.optimized_matmul(self.output_weights_T[idx], x_T)
-                    output = ttnn.transpose(output, 0, 1)
-                    output = ttnn.reshape(output, (1, 1, output.shape[-2], output.shape[-1])) # [V/split, B] -> [1, 1, B, V/split]
+                    output = ttnn.experimental.optimized_matmul(
+                        self.output_weights[idx],
+                        x,
+                        matmul_shape_override=(
+                            self.output_weights[idx].shape[-1],
+                            x.shape[-2],
+                            self.output_weights[idx].shape[-2],
+                        ),
+                        output_shape_override=(1, 1, x.shape[-2], self.output_weights[idx].shape[-1]),
+                    )
                 else:
                     output = ttnn.experimental.optimized_matmul(x, self.output_weights[idx])
             else:

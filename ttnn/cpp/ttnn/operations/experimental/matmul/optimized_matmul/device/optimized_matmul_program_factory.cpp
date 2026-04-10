@@ -5,6 +5,7 @@
 #include "optimized_matmul_device_operation.hpp"
 
 #include <cstdint>
+#include <fmt/format.h>
 #include <map>
 #include <unordered_map>
 #include <vector>
@@ -68,10 +69,13 @@ void create_sync_circular_buffer(
 }
 
 std::map<std::string, std::string> create_kernel_defines(
-    const OptimizedMatmulVariantSpec& variant_spec, const std::optional<uint32_t> physical_chip_id) {
+    const OptimizedMatmulVariantSpec& variant_spec,
+    const std::optional<uint32_t> physical_chip_id,
+    const std::optional<uint32_t> tensix_harvesting_mask) {
     auto defines = get_optimized_matmul_kernel_defines(variant_spec);
     defines["TTT_DMVK_SCHEDULE_HEADER"] =
-        get_optimized_matmul_schedule_header_include_path(variant_spec.active_grid, physical_chip_id);
+        get_optimized_matmul_schedule_header_include_path(
+            variant_spec.active_grid, physical_chip_id, tensix_harvesting_mask);
     return defines;
 }
 
@@ -110,15 +114,20 @@ OptimizedMatmulDeviceOperation::MultiCoreMeshWorkloadFactory::create_at(
     auto* target_device = mesh_device->get_device(mesh_coordinate);
     TT_FATAL(target_device != nullptr, "optimized_matmul could not resolve target device for {}", mesh_coordinate);
     const auto physical_chip_id = static_cast<uint32_t>(target_device->id());
+    const auto active_grid =
+        tt::tt_metal::CoreCoord{operation_attributes.active_grid_x, operation_attributes.active_grid_y};
+    const auto tensix_harvesting_mask = uses_optimized_matmul_harvest_schedule(active_grid)
+        ? std::optional<uint32_t>(tt::tt_metal::GetTensixHarvestingMask(target_device->id()))
+        : std::nullopt;
     const auto schedule_header_basename =
-        get_optimized_matmul_schedule_header_basename(
-            tt::tt_metal::CoreCoord{operation_attributes.active_grid_x, operation_attributes.active_grid_y},
-            physical_chip_id);
+        get_optimized_matmul_schedule_header_basename(active_grid, physical_chip_id, tensix_harvesting_mask);
     log_debug(
         tt::LogOp,
-        "optimized_matmul schedule selection: mesh_coordinate={}, physical_chip_id={}, header={}",
+        "optimized_matmul schedule selection: mesh_coordinate={}, physical_chip_id={}, tensix_harvesting_mask={}, "
+        "header={}",
         mesh_coordinate,
         physical_chip_id,
+        tensix_harvesting_mask.has_value() ? fmt::format("{:#x}", *tensix_harvesting_mask) : std::string("<none>"),
         schedule_header_basename);
 
     auto* src0_buffer = input_tensor_a.buffer();
@@ -138,7 +147,8 @@ OptimizedMatmulDeviceOperation::MultiCoreMeshWorkloadFactory::create_at(
         input_tensor_a,
         input_tensor_b,
         operation_attributes.output_dtype,
-        tt::tt_metal::CoreCoord{operation_attributes.active_grid_x, operation_attributes.active_grid_y});
+        tt::tt_metal::CoreCoord{operation_attributes.active_grid_x, operation_attributes.active_grid_y},
+        OptimizedMatmulDeviceOperation::get_matmul_shape_override(operation_attributes));
 
     Program program{};
 
@@ -195,7 +205,7 @@ OptimizedMatmulDeviceOperation::MultiCoreMeshWorkloadFactory::create_at(
         operation_attributes.output_memory_config.is_dram() ? 1U : 0U,
     };
 
-    const auto kernel_defines = create_kernel_defines(variant_spec, physical_chip_id);
+    const auto kernel_defines = create_kernel_defines(variant_spec, physical_chip_id, tensix_harvesting_mask);
 
     const auto dmvk_noc0_kernel_id = CreateKernel(
         program,

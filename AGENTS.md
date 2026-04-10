@@ -92,3 +92,23 @@ This file was updated with a basic regression test for `ttnn.experimental.optimi
 - If you change the implementation of `optimized_matmul`, update both the C++ registration path and the Python golden-function coverage.
 - Keep `optimized_matmul` build-integrated through `./build_metal.sh`.
 - Do not bypass the repository build script even for small TTNN changes.
+
+## Demo Perf Parsing Notes
+
+- For `models/tt_transformers/demo/simple_text_demo.py` runs, keep temporary logs under `/tmp` and follow the benchmark reset/cache rules from `$HOME/ttt-s2/AGENTS.md` before each NPU run.
+- Prefill parser validation was confirmed with:
+
+```bash
+MESH_DEVICE=T3K TTT_OPTIMIZED_MATMUL=1 MODEL=Llama-3.1-70B-Instruct S=1024 PROFILE=0 MODE=prefill time ./run.sh
+```
+
+- That prefill run emits a line of the form `Average Time to First Token (TTFT): 521.5ms`. `models/tt_transformers/lt` parses TTFT with the regex `\(TTFT\)\: (\d+\.\d+)ms`.
+- Decode parser validation was confirmed with:
+
+```bash
+MESH_DEVICE=T3K TTT_OPTIMIZED_MATMUL=1 MODEL=Llama-3.1-70B-Instruct S=512 PROFILE=0 MODE=decode time ./run.sh
+```
+
+- That decode run emits a line of the form `Average speed: 108.48ms @ 9.22 tok/s/user (294.98 tok/s throughput)`. `models/tt_transformers/lt` parses speed with the regex `@ (\d+\.\d+) tok/s/user`.
+- In the current fork, `skip transpose` is no longer controlled by an environment variable. With the expected runtime assumptions for this repo (`TG=False`, `is_galaxy=False`, `fused all-gather matmul=False`), the safe optimized-matmul call sites use skip-transpose behavior directly and the unsafe sites keep the explicit transpose path.
+- On this `T3K` + `Llama-3.1-70B-Instruct` setup, `MODE=decode` with `S=1024` and the default `GEN_TOKENS=128` fails before throughput reporting. The failure is the paged-attention assertion in `models/tt_transformers/demo/simple_text_demo.py` because `decode_budget + fixed_prefill_len` exceeds the effective paged-cache max sequence length of `1024`.

@@ -9,7 +9,11 @@ from models.common.lightweightmodule import LightweightModule
 from models.tt_transformers.tt.ccl import tt_all_reduce
 from models.tt_transformers.tt.common import pad_to_size
 from models.tt_transformers.tt.model_config import OpGroup, TensorGroup
-from models.tt_transformers.tt.common import use_optimized_matmul, ttnn_matmul_2dreuse_forced, use_optimized_matmul_transposed
+from models.tt_transformers.tt.common import (
+    use_optimized_matmul,
+    ttnn_matmul_2dreuse_forced,
+    use_optimized_matmul_transposed,
+)
 
 class MLP(LightweightModule):
     def __init__(
@@ -81,7 +85,10 @@ class MLP(LightweightModule):
         self.w2 = as_sharded_tensor("w2_sharded", ff2_dtype, dims=w2_dims)
         self.w3 = as_sharded_tensor("w3_sharded", ff1_3_dtype, dims=w1_dims)
 
-        if use_optimized_matmul() and use_optimized_matmul_transposed():
+        if (
+            use_optimized_matmul()
+            and use_optimized_matmul_transposed()
+        ):
             self.w1_T = ttnn.transpose(self.w1, 0, 1)
             self.w2_T = ttnn.transpose(self.w2, 0, 1)
             self.w3_T = ttnn.transpose(self.w3, 0, 1)
@@ -136,13 +143,20 @@ class MLP(LightweightModule):
 
         if use_optimized_matmul():
             if use_optimized_matmul_transposed():
-                x_T = ttnn.transpose(ttnn.squeeze(x), 0, 1)
-                w1_out_T = ttnn.experimental.optimized_matmul(self.w1_T, x_T, memory_config=memory_config)
-                w3_out_T = ttnn.experimental.optimized_matmul(self.w3_T, x_T, memory_config=memory_config)
-                w1_out = ttnn.transpose(w1_out_T, 0, 1)
-                w1_out = w1_out.reshape((1, 1, w1_out.shape[-2], w1_out.shape[-1]))
-                w3_out = ttnn.transpose(w3_out_T, 0, 1)
-                w3_out = w3_out.reshape((1, 1, w3_out.shape[-2], w3_out.shape[-1]))
+                w1_out = ttnn.experimental.optimized_matmul(
+                    self.w1_T,
+                    x,
+                    matmul_shape_override=(self.w1.shape[-1], x.shape[-2], self.w1.shape[-2]),
+                    output_shape_override=(1, 1, x.shape[-2], self.w1.shape[-1]),
+                    memory_config=memory_config,
+                )
+                w3_out = ttnn.experimental.optimized_matmul(
+                    self.w3_T,
+                    x,
+                    matmul_shape_override=(self.w3.shape[-1], x.shape[-2], self.w3.shape[-2]),
+                    output_shape_override=(1, 1, x.shape[-2], self.w3.shape[-1]),
+                    memory_config=memory_config,
+                )
             else:
                 w1_out = ttnn.experimental.optimized_matmul(x, self.w1, memory_config=memory_config)
                 w3_out = ttnn.experimental.optimized_matmul(x, self.w3, memory_config=memory_config)

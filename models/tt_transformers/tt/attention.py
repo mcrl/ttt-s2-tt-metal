@@ -11,7 +11,11 @@ from models.common.lightweightmodule import LightweightModule
 from models.common.rmsnorm import RMSNorm
 from models.tt_transformers.tt.ccl import tt_all_gather, tt_all_reduce
 from models.tt_transformers.tt.model_config import OpGroup, TensorGroup
-from models.tt_transformers.tt.common import use_optimized_matmul, ttnn_matmul_2dreuse_forced, use_optimized_matmul_transposed
+from models.tt_transformers.tt.common import (
+    use_optimized_matmul,
+    ttnn_matmul_2dreuse_forced,
+    use_optimized_matmul_transposed,
+)
 
 class Attention(LightweightModule):
     def __init__(
@@ -245,7 +249,10 @@ class Attention(LightweightModule):
             ),
             cache_file_name=cache_name("wqkv_sharded_2d"),
         )
-        if use_optimized_matmul() and use_optimized_matmul_transposed():
+        if (
+            use_optimized_matmul()
+            and use_optimized_matmul_transposed()
+        ):
             self.wqkv_T = ttnn.transpose(ttnn.squeeze(self.wqkv), 0, 1)
             ttnn.deallocate(self.wqkv)
 
@@ -324,7 +331,10 @@ class Attention(LightweightModule):
             ),
         )
 
-        if use_optimized_matmul() and use_optimized_matmul_transposed():
+        if (
+            use_optimized_matmul()
+            and use_optimized_matmul_transposed()
+        ):
             self.wo_T = ttnn.transpose(ttnn.squeeze(self.wo), 0, 1)
             ttnn.deallocate(self.wo)
 
@@ -409,12 +419,17 @@ class Attention(LightweightModule):
         forced_projection_core_grid = self.forced_non_lm_head_core_grid if self.is_p150_family else None
         if use_optimized_matmul():
             if use_optimized_matmul_transposed():
-                x_T = ttnn.transpose(ttnn.squeeze(x), 0, 1)
-                xqkv_fused_sharded_T = ttnn.experimental.optimized_matmul(self.wqkv_T, x_T, memory_config=ttnn.L1_MEMORY_CONFIG)
-                xqkv_fused_sharded = ttnn.transpose(xqkv_fused_sharded_T, 0, 1)
-                xqkv_fused_sharded = xqkv_fused_sharded.reshape((1, 1, xqkv_fused_sharded.shape[-2], xqkv_fused_sharded.shape[-1]))
+                xqkv_fused_sharded = ttnn.experimental.optimized_matmul(
+                    self.wqkv_T,
+                    x,
+                    matmul_shape_override=(self.wqkv.shape[-1], x.shape[-2], self.wqkv.shape[-2]),
+                    output_shape_override=(1, 1, x.shape[-2], self.wqkv.shape[-1]),
+                    memory_config=ttnn.L1_MEMORY_CONFIG,
+                )
             else:
-                xqkv_fused_sharded = ttnn.experimental.optimized_matmul(x, self.wqkv, memory_config=ttnn.L1_MEMORY_CONFIG)
+                xqkv_fused_sharded = ttnn.experimental.optimized_matmul(
+                    x, self.wqkv, memory_config=ttnn.L1_MEMORY_CONFIG
+                )
         else:
             xqkv_fused_sharded = ttnn_matmul_2dreuse_forced(
                 x,
@@ -647,11 +662,17 @@ class Attention(LightweightModule):
             if use_optimized_matmul():
                 if use_optimized_matmul_transposed():
                     attn_output_T = ttnn.transpose(ttnn.squeeze(attn_output), 0, 1)
-                    dense_out_sharded_T = ttnn.experimental.optimized_matmul(self.wo_T, attn_output_T, memory_config=ttnn.L1_MEMORY_CONFIG)
+                    dense_out_sharded_T = ttnn.experimental.optimized_matmul(
+                        self.wo_T, attn_output_T, memory_config=ttnn.L1_MEMORY_CONFIG
+                    )
                     dense_out_sharded = ttnn.transpose(dense_out_sharded_T, 0, 1)
-                    dense_out_sharded = ttnn.reshape(dense_out_sharded, (1, 1, dense_out_sharded.shape[-2], dense_out_sharded.shape[-1]))
+                    dense_out_sharded = ttnn.reshape(
+                        dense_out_sharded, (1, 1, dense_out_sharded.shape[-2], dense_out_sharded.shape[-1])
+                    )
                 else:
-                    dense_out_sharded = ttnn.experimental.optimized_matmul(attn_output, self.wo, memory_config=ttnn.L1_MEMORY_CONFIG)
+                    dense_out_sharded = ttnn.experimental.optimized_matmul(
+                        attn_output, self.wo, memory_config=ttnn.L1_MEMORY_CONFIG
+                    )
             else:
                 dense_out_sharded = ttnn_matmul_2dreuse_forced(
                     attn_output,
@@ -721,10 +742,12 @@ class Attention(LightweightModule):
 
         if use_optimized_matmul():
             if use_optimized_matmul_transposed():
-                x_11SH_T = ttnn.transpose(ttnn.squeeze(x_11SH), 0, 1)
-                xqkv_fused_T = ttnn.experimental.optimized_matmul(self.wqkv_T, x_11SH_T)
-                xqkv_fused = ttnn.transpose(xqkv_fused_T, 0, 1)
-                xqkv_fused = ttnn.reshape(xqkv_fused, (1, 1, xqkv_fused.shape[-2], xqkv_fused.shape[-1]))
+                xqkv_fused = ttnn.experimental.optimized_matmul(
+                    self.wqkv_T,
+                    x_11SH,
+                    matmul_shape_override=(self.wqkv.shape[-1], x_11SH.shape[-2], self.wqkv.shape[-2]),
+                    output_shape_override=(1, 1, x_11SH.shape[-2], self.wqkv.shape[-1]),
+                )
             else:
                 xqkv_fused = ttnn.experimental.optimized_matmul(x_11SH, self.wqkv)
         else:

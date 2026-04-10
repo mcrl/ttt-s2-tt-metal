@@ -936,6 +936,10 @@ ChipId GetPCIeDeviceID(ChipId device_id) {
     return tt::tt_metal::MetalContext::instance().get_cluster().get_associated_mmio_device(device_id);
 }
 
+uint32_t GetTensixHarvestingMask(ChipId device_id) {
+    return tt::tt_metal::MetalContext::instance().get_cluster().get_harvesting_mask(device_id);
+}
+
 ClusterType GetClusterType() { return tt::tt_metal::MetalContext::instance().get_cluster().get_cluster_type(); }
 
 std::string SerializeClusterDescriptor() {

@@ -50,14 +50,25 @@ inline OptimizedMatmulConfig resolve_optimized_matmul_config(
     const Tensor& input_tensor_a,
     const Tensor& input_tensor_b,
     const tt::tt_metal::DataType output_dtype,
-    const tt::tt_metal::CoreCoord& active_grid) {
+    const tt::tt_metal::CoreCoord& active_grid,
+    const std::optional<OptimizedMatmulShapeOverride>& matmul_shape_override = std::nullopt) {
     using namespace ttnn::operations::matmul;
 
+    const auto effective_shapes =
+        resolve_optimized_matmul_effective_shapes(input_tensor_a, input_tensor_b, matmul_shape_override);
+    const auto virtual_input_tensor_a =
+        input_tensor_a.reshape(effective_shapes.a_logical_shape, effective_shapes.a_padded_shape);
+    const auto virtual_input_tensor_b =
+        input_tensor_b.reshape(effective_shapes.b_logical_shape, effective_shapes.b_padded_shape);
     const auto program_config = resolve_matmul_2d_reuse_program_config(
-        input_tensor_a, input_tensor_b, std::nullopt, Matmul{.output_dtype = output_dtype}, std::nullopt);
+        virtual_input_tensor_a,
+        virtual_input_tensor_b,
+        std::nullopt,
+        Matmul{.output_dtype = output_dtype},
+        std::nullopt);
 
-    const auto& a_shape = input_tensor_a.padded_shape();
-    const auto& b_shape = input_tensor_b.padded_shape();
+    const auto& a_shape = effective_shapes.a_padded_shape;
+    const auto& b_shape = effective_shapes.b_padded_shape;
 
     const auto mt = static_cast<uint32_t>(a_shape[-2] / tt::constants::TILE_HEIGHT);
     const auto nt = static_cast<uint32_t>(b_shape[-1] / tt::constants::TILE_WIDTH);

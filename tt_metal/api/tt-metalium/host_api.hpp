@@ -88,6 +88,8 @@ size_t GetNumPCIeDevices();
 
 ChipId GetPCIeDeviceID(ChipId device_id);
 
+uint32_t GetTensixHarvestingMask(ChipId device_id);
+
 // clang-format off
 /**
  * Instantiates a device object.

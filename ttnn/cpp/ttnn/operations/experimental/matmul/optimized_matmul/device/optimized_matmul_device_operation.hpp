@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <array>
+#include <vector>
 #include <tuple>
 #include <variant>
 
@@ -34,6 +36,13 @@ struct OptimizedMatmulDeviceOperation {
         bool optimized_write_use_generated_schedule;
         uint32_t active_grid_x;
         uint32_t active_grid_y;
+        bool has_matmul_shape_override;
+        uint32_t override_m;
+        uint32_t override_n;
+        uint32_t override_k;
+        bool has_output_shape_override;
+        ttnn::Shape output_override_logical_shape;
+        ttnn::Shape output_override_padded_shape;
 
         static constexpr auto attribute_names = std::forward_as_tuple(
             "output_memory_config",
@@ -50,7 +59,14 @@ struct OptimizedMatmulDeviceOperation {
             "packer_l1_acc",
             "optimized_write_use_generated_schedule",
             "active_grid_x",
-            "active_grid_y");
+            "active_grid_y",
+            "has_matmul_shape_override",
+            "override_m",
+            "override_n",
+            "override_k",
+            "has_output_shape_override",
+            "output_override_logical_shape",
+            "output_override_padded_shape");
         auto attribute_values() const {
             return std::forward_as_tuple(
                 output_memory_config,
@@ -67,7 +83,14 @@ struct OptimizedMatmulDeviceOperation {
                 packer_l1_acc,
                 optimized_write_use_generated_schedule,
                 active_grid_x,
-                active_grid_y);
+                active_grid_y,
+                has_matmul_shape_override,
+                override_m,
+                override_n,
+                override_k,
+                has_output_shape_override,
+                output_override_logical_shape,
+                output_override_padded_shape);
         }
     };
 
@@ -117,6 +140,8 @@ struct OptimizedMatmulDeviceOperation {
     using program_factory_t = std::variant<MultiCoreMeshWorkloadFactory>;
 
     static program_factory_t select_program_factory(const operation_attributes_t&, const tensor_args_t&);
+    static std::optional<OptimizedMatmulShapeOverride> get_matmul_shape_override(const operation_attributes_t&);
+    static std::optional<OptimizedMatmulOutputShapeOverride> get_output_shape_override(const operation_attributes_t&);
     static void validate_on_program_cache_miss(const operation_attributes_t&, const tensor_args_t&);
     static void validate_on_program_cache_hit(const operation_attributes_t&, const tensor_args_t&);
     static spec_return_value_t compute_output_specs(const operation_attributes_t&, const tensor_args_t&);
@@ -124,6 +149,8 @@ struct OptimizedMatmulDeviceOperation {
     static std::tuple<operation_attributes_t, tensor_args_t> invoke(
         const Tensor& input_tensor_a,
         const Tensor& input_tensor_b,
+        std::optional<std::array<uint32_t, 3>> matmul_shape_override = std::nullopt,
+        std::optional<std::vector<uint32_t>> output_shape_override = std::nullopt,
         std::optional<const DeviceComputeKernelConfig> compute_kernel_config = std::nullopt,
         const std::optional<const MemoryConfig>& memory_config = std::nullopt,
         const std::optional<const DataType>& dtype = std::nullopt);
