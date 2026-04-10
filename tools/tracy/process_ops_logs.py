@@ -80,6 +80,7 @@ OPS_CSV_HEADER = [
     "OUTPUTS",
     "METAL TRACE ID",
     "METAL TRACE REPLAY SESSION ID",
+    "TRACE REPLAY TS",
     "COMPUTE KERNEL SOURCE",
     "COMPUTE KERNEL HASH",
     "DATA MOVEMENT KERNEL SOURCE",
@@ -393,7 +394,7 @@ def append_device_data(ops, traceReplays, logFolder, analyze_noc_traces, device_
                             assert (
                                 len(traceReplays[device][traceID]) > 0
                             ), "Wrong trace replay count: Device has more ops than trace replay issued commands"
-                            opIDHostDataDict[deviceOpID]["tracy_time"] = traceReplays[device][traceID][0]
+                            opIDHostDataDict[deviceOpID]["trace_replay_ts"] = traceReplays[device][traceID][0]
                             opIDHostDataDict[deviceOpID]["metal_trace_replay_session_id"] = (
                                 traceReplayCounts[device][traceID] - len(traceReplays[device][traceID]) + 1
                             )
@@ -856,13 +857,41 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
                 if count > tensorCSVData[ioType]["maxCount"]:
                     tensorCSVData[ioType]["maxCount"] = count
 
+        trace_replay_base_ts = {}
+        for traceOpID, traceOpData in traceOps.items():
+            if "trace_replay_ts" not in traceOpData:
+                continue
+
+            session_key = (
+                traceOpData.get("device_id"),
+                traceOpData.get("metal_trace_id"),
+                traceOpData.get("metal_trace_replay_session_id"),
+            )
+            host_start_ts = int(traceOpData["host_time"]["ns_since_start"])
+
+            if session_key in trace_replay_base_ts:
+                trace_replay_base_ts[session_key] = min(trace_replay_base_ts[session_key], host_start_ts)
+            else:
+                trace_replay_base_ts[session_key] = host_start_ts
+
+        def get_trace_aligned_host_start(opData):
+            session_key = (
+                opData.get("device_id"),
+                opData.get("metal_trace_id"),
+                opData.get("metal_trace_replay_session_id"),
+            )
+            host_start_ts = int(opData["host_time"]["ns_since_start"])
+            replay_ts = int(opData.get("trace_replay_ts", host_start_ts))
+            session_base_ts = trace_replay_base_ts.get(session_key, host_start_ts)
+            return replay_ts + (host_start_ts - session_base_ts)
+
         def row_compare(row):
             ret = 0
             if type(row) is str and "sp" in row:
                 ret = signposts[row]["tracy_time"]
             elif type(row) is int:
                 if row > ((1 << TRACE_OP_ID_BITSHIFT) - 1):
-                    ret = traceOps[row]["tracy_time"]
+                    ret = get_trace_aligned_host_start(traceOps[row])
                 else:
                     ret = ops[row]["host_time"]["ns_since_start"]
             ret = int(ret)
@@ -892,8 +921,7 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
                 rowDict["HOST START TS"] = int(signposts[row]["tracy_time"])
             elif type(row) is int:
                 op = row
-                is_trace_op = op > ((1 << TRACE_OP_ID_BITSHIFT) - 1)
-                if is_trace_op:
+                if op > ((1 << TRACE_OP_ID_BITSHIFT) - 1):
                     opData = traceOps[op]
                     opData["global_call_count"] = ((1 << TRACE_OP_ID_BITSHIFT) - 1) & op
                 else:
@@ -908,15 +936,15 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
                         rowDict[headerField] = fieldData
 
                 assert "host_time" in opData, "Corrupted op data"
-                # Trace replay ops should use replay time so signpost-based filtering
-                # can correctly isolate the replay region in downstream analysis.
-                if is_trace_op:
-                    rowDict["HOST START TS"] = int(opData["tracy_time"])
-                else:
-                    rowDict["HOST START TS"] = int(opData["host_time"]["ns_since_start"])
-                rowDict["HOST END TS"] = int(opData["host_time"]["ns_since_start"]) + int(
-                    opData["host_time"]["exec_time_ns"]
-                )
+                host_start_ts = int(opData["host_time"]["ns_since_start"])
+                if op > ((1 << TRACE_OP_ID_BITSHIFT) - 1):
+                    # Re-anchor replay rows to the replay issue timestamp while
+                    # preserving their relative offsets within the replay
+                    # session so downstream signpost filtering continues to work.
+                    host_start_ts = get_trace_aligned_host_start(opData)
+
+                rowDict["HOST START TS"] = host_start_ts
+                rowDict["HOST END TS"] = host_start_ts + int(opData["host_time"]["exec_time_ns"])
                 rowDict["HOST DURATION [ns]"] = int(opData["host_time"]["exec_time_ns"])
 
                 if "NOC UTIL (%)" in opData:
