@@ -23,7 +23,7 @@ def use_optimized_matmul():
 def use_optimized_matmul_transposed():
     return os.getenv("TTT_OPTIMIZED_MATMUL_TRANSPOSED", "1") == "1"
 
-def ttnn_matmul_2dreuse_forced(in0, in1, memory_config, dtype, compute_kernel_config, core_grid=None):
+def ttnn_matmul_2dreuse_forced(in0, in1, memory_config, compute_kernel_config, dtype=None, core_grid=None):
     program_config = ttnn.resolve_matmul_2d_reuse_program_config(
         in0,
         in1,

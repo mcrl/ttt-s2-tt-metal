@@ -81,26 +81,6 @@ class MathFidelitySetting(Enum):
 
 
 class ModelOptimizations:
-    @staticmethod
-    def _uniform_bfp8_tensor_settings(include_activation=True):
-        settings = {
-            TensorGroup.FF1_FF3: PrecisionSetting.BFP8,
-            TensorGroup.FF2: PrecisionSetting.BFP8,
-            TensorGroup.WQKV: PrecisionSetting.BFP8,
-            TensorGroup.WO: PrecisionSetting.BFP8,
-            TensorGroup.KV_CACHE: PrecisionSetting.BFP8,
-        }
-        if include_activation:
-            settings[TensorGroup.ACTIVATION] = PrecisionSetting.BFP8
-        return settings
-
-    @staticmethod
-    def _uniform_bfp8_op_fidelity_settings():
-        return {
-            OpGroup.LI_FF1_FF3: MathFidelitySetting.HIFI2_FP16,
-            OpGroup.LI_FF2: MathFidelitySetting.HIFI2_FP16,
-        }
-
     @classmethod
     def accuracy(cls, model_name):
         """Configuration optimized for accuracy
@@ -113,8 +93,8 @@ class ModelOptimizations:
             )
             inst = cls(
                 {
-                    "TensorPrecision": cls._uniform_bfp8_tensor_settings(),
-                    "OpFidelity": cls._uniform_bfp8_op_fidelity_settings(),
+                    "TensorPrecision": {TensorGroup.FF1_FF3: PrecisionSetting.BFP8},
+                    "OpFidelity": {OpGroup.LI_FF1_FF3: MathFidelitySetting.HIFI2_FP16},
                 }
             )
         else:
@@ -132,8 +112,15 @@ class ModelOptimizations:
                     f"Llama 3, Mistral 7B and Phi3-mini models test insensitive to attention precision, using a uniform BFP8 matmul tensor configuration with FP16 MLP accumulation even in accuracy mode"
                 )
                 settings = {
-                    "TensorPrecision": cls._uniform_bfp8_tensor_settings(),
-                    "OpFidelity": cls._uniform_bfp8_op_fidelity_settings(),
+                    "TensorPrecision": {
+                        TensorGroup.WQKV: PrecisionSetting.BFP8,
+                        TensorGroup.KV_CACHE: PrecisionSetting.BFP8,
+                        TensorGroup.WO: PrecisionSetting.BFP8,
+                    },
+                    "OpFidelity": {
+                        OpGroup.LI_FF1_FF3: MathFidelitySetting.HIFI2_FP16,
+                        OpGroup.LI_FF2: MathFidelitySetting.HIFI2_FP16,
+                    },
                 }
                 if model_name.startswith("Phi-3-mini"):  # TODO: Only do this for N150
                     logger.info(
@@ -191,8 +178,8 @@ class ModelOptimizations:
             )
         else:
             settings = {
-                "TensorPrecision": cls._uniform_bfp8_tensor_settings(),
-                "OpFidelity": cls._uniform_bfp8_op_fidelity_settings(),
+                "TensorPrecision": {TensorGroup.FF1_FF3: PrecisionSetting.BFP8},
+                "OpFidelity": {OpGroup.LI_FF1_FF3: MathFidelitySetting.HIFI2_FP16},
             }
             if model_name.startswith("Phi-3-mini"):  # TODO: Only do this for N150
                 logger.info(
@@ -474,8 +461,7 @@ class ModelArgs:
 
         self.device_name = determine_device_name(self.mesh_device)
         self.is_p150_family = self.device_name in {"P150", "P150x4", "P150x8"}
-        self.forced_non_lm_head_core_grid = None
-        self.forced_lm_head_core_grid = None
+        self.forced_core_grid = None
 
         logger.info(f"Inferring device name: {self.device_name}")
         device = mesh_device if mesh_device is not None else None
@@ -636,8 +622,7 @@ class ModelArgs:
             grid = device.compute_with_storage_grid_size()
             self.max_grid_size = ttnn.CoreGrid(x=grid.x, y=grid.y)
             if self.is_p150_family:
-                self.forced_non_lm_head_core_grid = ttnn.CoreGrid(x=12, y=10)
-                self.forced_lm_head_core_grid = self.forced_non_lm_head_core_grid
+                self.forced_core_grid = ttnn.CoreGrid(x=12, y=10)
 
             # DRAM weight grid specs for dram sharding matmuls
             self.dram_weight_grid = ttnn.CoreRangeSet(
@@ -777,15 +762,11 @@ class ModelArgs:
             mlp1_3_grid = lambda seq_len: (
                 (8, min(min(seq_len, 1024) // 32, 4))
                 if self.is_galaxy
-                else forced_prefill_grid
-                if self.is_p150_family
                 else self.find_prefill_grid(prefill_rows, self.dim // self.tile_size)
             )
             mlp2_grid = lambda seq_len: (
                 (8, min(min(seq_len, 1024) // 32, 4))
                 if self.is_galaxy
-                else forced_prefill_grid
-                if self.is_p150_family
                 else self.find_prefill_grid(prefill_rows, self.hidden_dim // self.tile_size)
             )
 
@@ -793,19 +774,14 @@ class ModelArgs:
             n_w1_w3 = self.hidden_dim // self.cluster_shape[1]
             # Using dram_shard_grid_width to ensure per_core_N matches DRAM shard width for P100, otherwise matmuls silently give bad PCC
             dram_shard_grid_width = 8 if is_wormhole_b0() else self.dram_grid_size.x  # 7 for P100, 8 for P150
-            prefill_grid_width = forced_prefill_grid[0] if self.is_p150_family else dram_shard_grid_width
             self.model_config["PREFILL_MLP_W1_W3_PRG_CONFIG"] = lambda seq_len: self.matmul_config(
                 m=min(seq_len, self.prefill_len_cutoff),  # 512 if BH, 1024 if WH
                 k=self.dim // self.cluster_shape[0],
                 n=n_w1_w3,
                 grid_size=mlp1_3_grid(seq_len),
-                in0_block_w=1 if self.is_p150_family else None,
-                per_core_M=(
-                    math.ceil(min(seq_len, self.prefill_len_cutoff) / self.tile_size / forced_prefill_grid[1])
-                    if self.is_p150_family
-                    else None
-                ),
-                per_core_N=math.ceil(n_w1_w3 / (self.tile_size * prefill_grid_width)) if mlp_w_dram_sharded else None,
+                per_core_N=math.ceil(n_w1_w3 / (self.tile_size * dram_shard_grid_width))
+                if mlp_w_dram_sharded
+                else None,
             )
             n_w2 = self.dim
             self.model_config["PREFILL_MLP_W2_PRG_CONFIG"] = lambda seq_len: self.matmul_config(
@@ -813,28 +789,15 @@ class ModelArgs:
                 k=self.hidden_dim // (self.cluster_shape[1] if self.is_galaxy else 1),
                 n=n_w2,
                 grid_size=mlp2_grid(seq_len),
-                in0_block_w=1 if self.is_p150_family else None,
-                per_core_M=(
-                    math.ceil(min(seq_len, self.prefill_len_cutoff) / self.tile_size / forced_prefill_grid[1])
-                    if self.is_p150_family
-                    else None
-                ),
-                per_core_N=math.ceil(n_w2 / (self.tile_size * prefill_grid_width)) if mlp_w_dram_sharded else None,
+                per_core_N=math.ceil(n_w2 / (self.tile_size * dram_shard_grid_width)) if mlp_w_dram_sharded else None,
             )
             self.model_config["PREFILL_MIXTRAL_MLP_W1_PRG_CONFIG"] = lambda seq_len: self.matmul_config(
                 m=min(seq_len, self.prefill_len_cutoff),  # 512 if BH, 1024 if WH
                 k=self.dim // self.cluster_shape[0],
                 n=n_w1_w3,
                 grid_size=mlp1_3_grid(min(seq_len, self.prefill_len_cutoff)),
-                in0_block_w=1 if self.is_p150_family else None,
-                per_core_M=(
-                    math.ceil(min(seq_len, self.prefill_len_cutoff) / self.tile_size / forced_prefill_grid[1])
-                    if self.is_p150_family
-                    else math.ceil(min(seq_len, self.prefill_len_cutoff) / self.tile_size / self.cluster_shape[1])
-                ),
-                per_core_N=math.ceil(n_w1_w3 / (self.tile_size * prefill_grid_width))
-                if self.is_p150_family
-                else math.ceil(n_w1_w3 / self.tile_size / self.cluster_shape[0]),
+                per_core_M=math.ceil(min(seq_len, self.prefill_len_cutoff) / self.tile_size / self.cluster_shape[1]),
+                per_core_N=math.ceil(n_w1_w3 / self.tile_size / self.cluster_shape[0]),
                 fused_activation=ttnn.UnaryOpType.SILU,
             )
             self.model_config["PREFILL_MIXTRAL_MLP_W3_PRG_CONFIG"] = lambda seq_len: self.matmul_config(
@@ -842,15 +805,8 @@ class ModelArgs:
                 k=self.dim // self.cluster_shape[0],
                 n=n_w1_w3,
                 grid_size=mlp1_3_grid(min(seq_len, self.prefill_len_cutoff)),
-                in0_block_w=1 if self.is_p150_family else None,
-                per_core_M=(
-                    math.ceil(min(seq_len, self.prefill_len_cutoff) / self.tile_size / forced_prefill_grid[1])
-                    if self.is_p150_family
-                    else math.ceil(min(seq_len, self.prefill_len_cutoff) / self.tile_size / self.cluster_shape[1])
-                ),
-                per_core_N=math.ceil(n_w1_w3 / (self.tile_size * prefill_grid_width))
-                if self.is_p150_family
-                else math.ceil(n_w1_w3 / self.tile_size / self.cluster_shape[0]),
+                per_core_M=math.ceil(min(seq_len, self.prefill_len_cutoff) / self.tile_size / self.cluster_shape[1]),
+                per_core_N=math.ceil(n_w1_w3 / self.tile_size / self.cluster_shape[0]),
             )
             # Attention output is not necessarily the same dimension as the self.dim, e.g. in Mistral
             k_dim = (
@@ -863,14 +819,13 @@ class ModelArgs:
             n_dim = (
                 self.dim // self.cluster_shape[1]
                 if self.is_galaxy
-                else self.dim
-                # else (
-                #     1024
-                #     if self.num_devices == 8
-                #     and os.getenv("ACTUAL_DEVICE", "") != "TG"
-                #     and 1024 % (self.dim / self.num_devices) == 0
-                #     else self.dim
-                # )
+                else (
+                    1024
+                    if self.num_devices == 8
+                    and os.getenv("ACTUAL_DEVICE", "") != "TG"
+                    and 1024 % (self.dim / self.num_devices) == 0
+                    else self.dim
+                )
             )
             num_rows = lambda seq_len: min(seq_len, 1024)
             dram_sharded_wo = not (self.model_config["USE_FUSED_ALL_GATHER_MATMUL"] or self.is_galaxy)
@@ -878,17 +833,10 @@ class ModelArgs:
                 m=num_rows(seq_len),
                 k=k_dim,
                 n=n_dim,
-                grid_size=forced_prefill_grid
-                if self.is_p150_family
-                else self.find_prefill_grid(prefill_rows, k_dim // self.tile_size),
-                in0_block_w=1 if self.is_p150_family else (1 if self.is_galaxy else None),
+                grid_size=self.find_prefill_grid(prefill_rows, k_dim // self.tile_size),
+                in0_block_w=1 if self.is_galaxy else None,
                 fuse_batch=seq_len <= 1024,
-                per_core_M=(
-                    math.ceil(num_rows(seq_len) / self.tile_size / forced_prefill_grid[1])
-                    if self.is_p150_family
-                    else None
-                ),
-                per_core_N=math.ceil(n_dim / (self.tile_size * prefill_grid_width)) if dram_sharded_wo else None,
+                per_core_N=math.ceil(n_dim / (self.tile_size * dram_shard_grid_width)) if dram_sharded_wo else None,
             )
 
             # Calculate largest number of lm_head_num_rows such that self.dim % (lm_head_num_rows * lm_head_cores_per_row) == 0
@@ -938,16 +886,11 @@ class ModelArgs:
                 out_subblock_w=1,  # Must be divisible by per_core_N, out_subblock_w * out_subblock_h <= 4
                 per_core_M=max(
                     1,
-                    prefill_rows
-                    if seq_len >= self.MAX_QKV_MM_SEQ_LEN
-                    else math.ceil(seq_len / self.tile_size / prefill_rows),
+                    8 if seq_len >= self.MAX_QKV_MM_SEQ_LEN else math.ceil(seq_len / self.tile_size / 8),  # 8 rows
                 ),  # M / TILE_HEIGHT / Grid_Size (dynamic based on seqlen)
                 per_core_N=math.ceil(
-                    self.qkv_size
-                    / self.cluster_shape[1]
-                    / 32
-                    / (forced_prefill_grid[0] if self.is_p150_family else dram_shard_grid_width)
-                ),  # N / TILE_WIDTH / grid width
+                    self.qkv_size / self.cluster_shape[1] / 32 / dram_shard_grid_width
+                ),
                 transpose_mcast=False,
                 fused_activation=None,
                 fuse_batch=seq_len <= self.MAX_QKV_MM_SEQ_LEN,

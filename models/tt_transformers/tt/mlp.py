@@ -114,7 +114,7 @@ class MLP(LightweightModule):
         activation_dtype = self.model_config["DECODERS_OPTIMIZATIONS"].get_tensor_dtype(
             decoder_id=layer_num, tensor=TensorGroup.ACTIVATION
         )
-        forced_core_grid = self.args.forced_non_lm_head_core_grid if self.args.is_p150_family else None
+        forced_core_grid = self.args.forced_core_grid if self.args.is_p150_family else None
         li_ff1_3_compute_kernel_cfg = self.model_config["DECODERS_OPTIMIZATIONS"].get_math_fidelity(
             decoder_id=layer_num, op=OpGroup.LI_FF1_FF3, configuration=self.args
         )
@@ -138,8 +138,6 @@ class MLP(LightweightModule):
         # In decode mode (seqlen <= 32) do DRAM sharded matmuls
         # These use HiFi2; this drops 1 bit of the activations but would be FLOP-bound on 12 cores with HiFi4
         memory_config = ttnn.L1_MEMORY_CONFIG if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG # TTT
-        if x.dtype != ttnn.bfloat8_b:
-            x = ttnn.typecast(x, ttnn.bfloat8_b)
 
         if use_optimized_matmul():
             if use_optimized_matmul_transposed():
@@ -164,7 +162,7 @@ class MLP(LightweightModule):
             w1_out = ttnn_matmul_2dreuse_forced(
                 x,
                 self.w1,
-                dtype=ttnn.bfloat8_b,
+                dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
                 core_grid=forced_core_grid,
                 compute_kernel_config=li_ff1_3_compute_kernel_cfg,
                 memory_config=memory_config,
@@ -173,7 +171,7 @@ class MLP(LightweightModule):
             w3_out = ttnn_matmul_2dreuse_forced(
                 x,
                 self.w3,
-                dtype=ttnn.bfloat8_b,
+                dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
                 core_grid=forced_core_grid,
                 compute_kernel_config=li_ff1_3_compute_kernel_cfg,
                 memory_config=memory_config,
@@ -279,8 +277,6 @@ class MLP(LightweightModule):
         li_ff2_compute_kernel_cfg = self.model_config["DECODERS_OPTIMIZATIONS"].get_math_fidelity(
             decoder_id=layer_num, op=OpGroup.LI_FF2, configuration=self.args
         )
-        if w2_in.dtype != ttnn.bfloat8_b:
-            w2_in = ttnn.typecast(w2_in, ttnn.bfloat8_b)
 
         if use_optimized_matmul(): # TTT
             if use_optimized_matmul_transposed():
@@ -295,7 +291,7 @@ class MLP(LightweightModule):
                 w2_in,
                 self.w2,
                 compute_kernel_config=li_ff2_compute_kernel_cfg,
-                dtype=ttnn.bfloat8_b,
+                dtype=self.args.ccl_dtype if TG else activation_dtype or ttnn.bfloat16,
                 memory_config=memory_config,
                 core_grid=forced_core_grid,
             )

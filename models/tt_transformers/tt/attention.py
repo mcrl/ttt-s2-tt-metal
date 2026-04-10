@@ -92,7 +92,7 @@ class Attention(LightweightModule):
         self.max_seq_len = configuration.max_seq_len
         self.grid_size = configuration.max_grid_size
         self.is_p150_family = configuration.is_p150_family
-        self.forced_non_lm_head_core_grid = configuration.forced_non_lm_head_core_grid
+        self.forced_core_grid = configuration.forced_core_grid 
 
         self.compute_kernel_config_hifi2 = configuration.compute_kernel_config_hifi2
         self.compute_kernel_config_hifi2_fp16 = configuration.compute_kernel_config_hifi2_fp16
@@ -414,9 +414,6 @@ class Attention(LightweightModule):
         # QKV matmuls
         # Use HiFi2 for DRAM-sharded matmuls as they are otherwise flop-bound. Loses 1 bit of activation precision.
         ###
-        if x.dtype != ttnn.bfloat8_b:
-            x = ttnn.typecast(x, ttnn.bfloat8_b)
-        forced_projection_core_grid = self.forced_non_lm_head_core_grid if self.is_p150_family else None
         if use_optimized_matmul():
             if use_optimized_matmul_transposed():
                 xqkv_fused_sharded = ttnn.experimental.optimized_matmul(
@@ -436,8 +433,8 @@ class Attention(LightweightModule):
                 self.wqkv,
                 memory_config=ttnn.L1_MEMORY_CONFIG,
                 compute_kernel_config=self.li_qkv_decode_compute_kernel_cfg,
-                dtype=ttnn.bfloat8_b,
-                core_grid=forced_projection_core_grid,
+                dtype=self.ccl_dtype if self.TG else self.activation_dtype or ttnn.bfloat16,
+                core_grid=self.forced_core_grid if self.is_p150_family else None,
             )
         # FIXME: File bug against dram-sharded matmuls with bias
         if self.wqkv_bias_decode:
@@ -657,8 +654,6 @@ class Attention(LightweightModule):
 
             # TODO: Fix this once self.TG supports dram-sharded matmuls
             attn_output = ttnn.to_memory_config(attn_output, ttnn.L1_MEMORY_CONFIG)
-            if attn_output.dtype != ttnn.bfloat8_b:
-                attn_output = ttnn.typecast(attn_output, ttnn.bfloat8_b)
             if use_optimized_matmul():
                 if use_optimized_matmul_transposed():
                     attn_output_T = ttnn.transpose(ttnn.squeeze(attn_output), 0, 1)
@@ -677,8 +672,7 @@ class Attention(LightweightModule):
                 dense_out_sharded = ttnn_matmul_2dreuse_forced(
                     attn_output,
                     self.wo,
-                    core_grid=ttnn.CoreGrid(y=4, x=8) if self.TG else forced_projection_core_grid,
-                    dtype=ttnn.bfloat8_b,
+                    core_grid=ttnn.CoreGrid(y=4, x=8) if self.TG else self.forced_core_grid if self.is_p150_family else None,
                     memory_config=ttnn.L1_MEMORY_CONFIG,
                     compute_kernel_config=self.li_o_decode_compute_kernel_cfg,
                 )
@@ -751,13 +745,23 @@ class Attention(LightweightModule):
             else:
                 xqkv_fused = ttnn.experimental.optimized_matmul(x_11SH, self.wqkv)
         else:
+            """
             xqkv_fused = ttnn.linear(
                 x_11SH,
                 self.wqkv,
-                dtype=ttnn.bfloat8_b,
+                dtype=self.ccl_dtype if self.TG else self.activation_dtype or ttnn.bfloat16,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 compute_kernel_config=self.li_qkv_prefill_compute_kernel_cfg,
                 program_config=self.model_config["XQKV_PREFILL_PROGCFG"](seq_len),
+            )
+            """
+            xqkv_fused = ttnn_matmul_2dreuse_forced(
+                x_11SH,
+                self.wqkv,
+                dtype=self.ccl_dtype if self.TG else self.activation_dtype or ttnn.bfloat16,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                compute_kernel_config=self.li_qkv_prefill_compute_kernel_cfg,
+                core_grid=self.forced_core_grid if self.is_p150_family else None,
             )
 
         # FIXME: surely ttnn.linear bias should work?
@@ -953,8 +957,7 @@ class Attention(LightweightModule):
             else:
                 output_11SH = ttnn.experimental.optimized_matmul(attn_output_11SH, self.wo)
         else:
-            if attn_output_11SH.dtype != ttnn.bfloat8_b:
-                attn_output_11SH = ttnn.typecast(attn_output_11SH, ttnn.bfloat8_b)
+            """
             output_11SH = ttnn.linear(
                 attn_output_11SH,
                 self.wo,
@@ -962,6 +965,15 @@ class Attention(LightweightModule):
                 dtype=ttnn.bfloat8_b,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 program_config=self.model_config["WO_PREFILL_PROGCFG"](seq_len),
+            )
+            """
+            output_11SH = ttnn_matmul_2dreuse_forced(
+                attn_output_11SH,
+                self.wo,
+                compute_kernel_config=self.li_o_prefill_compute_kernel_cfg,
+                dtype=self.activation_dtype or ttnn.bfloat8_b,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                core_grid=self.forced_core_grid if self.is_p150_family else None,
             )
 
         if seq_len > 1024:
