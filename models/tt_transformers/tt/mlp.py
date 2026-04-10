@@ -128,9 +128,11 @@ class MLP(LightweightModule):
                 pc_2 = self.model_config["DECODE_MLP_W2_PRG_CONFIG"]
                 pc_3 = self.model_config["DECODE_MLP_W1_W3_PRG_CONFIG"]
         else:  # Update the program configs based for prefill
+            """
             if seq_len >= self.args.prefill_len_cutoff:  # 512 if Blackhole, 1024 if Wormhole
                 # Reshape input to to fit on device and parallelize computation
                 x = ttnn.reshape(x, [1, seq_len // self.args.prefill_len_cutoff, self.args.prefill_len_cutoff, -1])
+            """
             pc_1 = self.model_config["PREFILL_MLP_W1_W3_PRG_CONFIG"](seq_len)
             pc_2 = self.model_config["PREFILL_MLP_W2_PRG_CONFIG"](seq_len)
             pc_3 = self.model_config["PREFILL_MLP_W1_W3_PRG_CONFIG"](seq_len)

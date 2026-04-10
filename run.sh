@@ -17,8 +17,8 @@ export TT_CACHE_PATH=$HOME/.cache/ttt-weight-cache/$MODEL
 
 export B=${B:-32}
 export S=${S:-1024}
-export MAX_S=${MAX_S:-1500}
 export GEN_TOKENS=${GEN_TOKENS:-128}
+export MAX_S=${MAX_S:-$((S + GEN_TOKENS))}
 export MODE=${MODE:-prefill}
 export PROFILE=${PROFILE:-0}
 
@@ -34,8 +34,7 @@ if [ "$PROFILE" -eq 0 ]; then
     -k "batch-32 and performance" \
     --max_generated_tokens $GEN_TOKENS \
     --max_seq_len $MAX_S \
-    --batch_size $B \
-    --mode $MODE
+    --batch_size $B
 else
   python -m tt_lock python -m tracy -r -p -v -m pytest --tb=short -s \
     models/tt_transformers/demo/simple_text_demo.py::test_demo_text \

@@ -196,6 +196,26 @@ def create_tt_page_table(global_batch_size, data_parallel, paged_attention_confi
     return page_table
 
 
+def normalize_page_params_for_context(page_params, max_seq_len, batch_size, paged_attention):
+    if not paged_attention or page_params is None:
+        return page_params
+
+    normalized_page_params = dict(page_params)
+    block_size = normalized_page_params["page_block_size"]
+    required_blocks_per_user = math.ceil(max_seq_len / block_size)
+    required_blocks_per_dp = required_blocks_per_user * batch_size
+
+    if required_blocks_per_dp > normalized_page_params["page_max_num_blocks_per_dp"]:
+        logger.info(
+            "Increasing page table capacity to match max_seq_len: "
+            f"block_size={block_size}, batch_size={batch_size}, max_seq_len={max_seq_len}, "
+            f"page_max_num_blocks_per_dp {normalized_page_params['page_max_num_blocks_per_dp']} -> {required_blocks_per_dp}"
+        )
+        normalized_page_params["page_max_num_blocks_per_dp"] = required_blocks_per_dp
+
+    return normalized_page_params
+
+
 def prepare_generator_args(
     num_devices,
     data_parallel,
@@ -806,6 +826,7 @@ def test_demo_text(
 
     num_devices = mesh_device.get_num_devices() if isinstance(mesh_device, ttnn.MeshDevice) else 1
     global_batch_size = batch_size * data_parallel  # input batch_size is interpreted as size per DP group
+    page_params = normalize_page_params_for_context(page_params, max_seq_len, batch_size, paged_attention)
 
     hf_dir = os.getenv("HF_MODEL", "")
     if "phi-3-mini-128k-instruct" in hf_dir.lower():
