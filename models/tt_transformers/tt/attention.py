@@ -729,10 +729,12 @@ class Attention(LightweightModule):
         #     x_11SH = ttnn.typecast(x_11SH, ttnn.bfloat8_b)
 
         # reshaping long sequence to matmul fit on device
+        """
         if seq_len > self.MAX_QKV_MM_SEQ_LEN:
             if seq_len % self.MAX_QKV_MM_SEQ_LEN != 0:
                 raise ValueError(f"seq_len {seq_len} must be divisible by {self.MAX_QKV_MM_SEQ_LEN}")
             x_11SH = ttnn.reshape(x_11SH, [1, seq_len // self.MAX_QKV_MM_SEQ_LEN, self.MAX_QKV_MM_SEQ_LEN, -1])
+        """
 
         if use_optimized_matmul():
             if use_optimized_matmul_transposed():
