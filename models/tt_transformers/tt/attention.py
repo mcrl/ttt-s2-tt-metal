@@ -416,11 +416,13 @@ class Attention(LightweightModule):
                     output_shape_override=(1, 1, x.shape[-2], self.wqkv.shape[-1]),
                     memory_config=ttnn.L1_MEMORY_CONFIG,
                     compute_kernel_config=self.li_qkv_decode_compute_kernel_cfg,
+                    dtype=ttnn.bfloat16
                 )
             else:
                 xqkv_fused_sharded = ttnn.experimental.optimized_matmul(
                     x, self.wqkv, memory_config=ttnn.L1_MEMORY_CONFIG,
                     compute_kernel_config=self.li_qkv_decode_compute_kernel_cfg,
+                    dtype=ttnn.bfloat16
                 )
         else:
             xqkv_fused_sharded = ttnn_matmul_2dreuse_forced(
@@ -428,7 +430,7 @@ class Attention(LightweightModule):
                 self.wqkv,
                 memory_config=ttnn.L1_MEMORY_CONFIG,
                 compute_kernel_config=self.li_qkv_decode_compute_kernel_cfg,
-                dtype=self.ccl_dtype if self.TG else self.activation_dtype or ttnn.bfloat16,
+                dtype=ttnn.bfloat16,
                 core_grid=self.forced_core_grid if self.is_p150_family else None,
             )
         # FIXME: File bug against dram-sharded matmuls with bias
@@ -740,10 +742,12 @@ class Attention(LightweightModule):
                     matmul_shape_override=(self.wqkv.shape[-1], x_11SH.shape[-2], self.wqkv.shape[-2]),
                     output_shape_override=(1, 1, x_11SH.shape[-2], self.wqkv.shape[-1]),
                     compute_kernel_config=self.li_qkv_prefill_compute_kernel_cfg,
+                    dtype=ttnn.bfloat16
                 )
             else:
                 xqkv_fused = ttnn.experimental.optimized_matmul(x_11SH, self.wqkv, 
-                                        compute_kernel_config=self.li_qkv_prefill_compute_kernel_cfg)
+                                        compute_kernel_config=self.li_qkv_prefill_compute_kernel_cfg,
+                                        dtype=ttnn.bfloat16)
         else:
             """
             xqkv_fused = ttnn.linear(
@@ -758,7 +762,7 @@ class Attention(LightweightModule):
             xqkv_fused = ttnn_matmul_2dreuse_forced(
                 x_11SH,
                 self.wqkv,
-                dtype=self.ccl_dtype if self.TG else self.activation_dtype or ttnn.bfloat16,
+                dtype=ttnn.bfloat16,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 compute_kernel_config=self.li_qkv_prefill_compute_kernel_cfg,
                 core_grid=self.forced_core_grid if self.is_p150_family else None,
@@ -929,8 +933,10 @@ class Attention(LightweightModule):
         )
         ttnn.deallocate(attn_output_1QSD)
         # reshaping long sequence to matmul fit on device
+        """
         if seq_len > 1024:
             attn_output_11SH = ttnn.reshape(attn_output_11SH, [1, seq_len // 1024, 1024, -1])
+        """
 
         # Non fused All Gather Matmul
         if self.use_fused_all_gather_matmul:  # is true for Ring topology
