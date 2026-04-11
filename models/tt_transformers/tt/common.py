@@ -39,8 +39,6 @@ def make_ttt_compute_kernel_config():
     return ttnn.WormholeComputeKernelConfig(
         math_fidelity=get_ttt_math_fidelity(),
         math_approx_mode=False,
-        fp32_dest_acc_en=False,
-        packer_l1_acc=True,
     )
 
 def ttnn_matmul_2dreuse_forced(in0, in1, memory_config, compute_kernel_config, dtype=None, core_grid=None):
